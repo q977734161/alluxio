@@ -11,8 +11,6 @@
 
 package alluxio.util.io;
 
-import alluxio.Constants;
-
 import com.google.common.base.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,7 +31,8 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class BufferUtils {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(BufferUtils.class);
+
   private static Method sCleanerCleanMethod;
   private static Method sByteBufferCleanerMethod;
 
@@ -62,7 +61,7 @@ public final class BufferUtils {
    * @param buffer the byte buffer to be unmapped, this must be a direct buffer
    */
   public static synchronized void cleanDirectBuffer(ByteBuffer buffer) {
-    Preconditions.checkNotNull(buffer);
+    Preconditions.checkNotNull(buffer, "buffer");
     Preconditions.checkArgument(buffer.isDirect(), "buffer isn't a DirectByteBuffer");
     try {
       if (sByteBufferCleanerMethod == null) {
@@ -82,7 +81,8 @@ public final class BufferUtils {
       }
       sCleanerCleanMethod.invoke(cleaner);
     } catch (Exception e) {
-      LOG.warn("Failed to unmap direct ByteBuffer: {}", buffer.getClass().getName(), e);
+      LOG.warn("Failed to unmap direct ByteBuffer: {}, error message: {}",
+                buffer.getClass().getName(), e.getMessage());
     } finally {
       // Force to drop reference to the buffer to clean
       buffer = null;
@@ -95,7 +95,7 @@ public final class BufferUtils {
    * The new bytebuffer will have the same content, but the type of the bytebuffer may not be the
    * same.
    *
-   * @param buf The ByteBuffer to clone
+   * @param buf The ByteBuffer to copy
    * @return The new ByteBuffer
    */
   public static ByteBuffer cloneByteBuffer(ByteBuffer buf) {
@@ -113,7 +113,7 @@ public final class BufferUtils {
   /**
    * Clones a list of {@link ByteBuffer}s.
    *
-   * @param source the list of ByteBuffers to clone
+   * @param source the list of ByteBuffers to copy
    * @return the new list of ByteBuffers
    */
   public static List<ByteBuffer> cloneByteBufferList(List<ByteBuffer> source) {
@@ -122,21 +122,6 @@ public final class BufferUtils {
       ret.add(cloneByteBuffer(b));
     }
     return ret;
-  }
-
-  /**
-   * Extracts a correct {@link ByteBuffer} from Thrift RPC result.
-   *
-   * @param data result of Thrift RPC
-   * @return ByteBuffer with data extracted from the Thrift RPC result
-   */
-  public static ByteBuffer generateNewByteBufferFromThriftRPCResults(ByteBuffer data) {
-    // TODO(cc): This is a trick to fix the issue in thrift. Change the code to use metadata
-    // directly when thrift fixes the issue.
-    ByteBuffer correctData = ByteBuffer.allocate(data.limit() - data.position());
-    correctData.put(data);
-    correctData.flip();
-    return correctData;
   }
 
   /**
@@ -211,7 +196,7 @@ public final class BufferUtils {
 
   /**
    * Checks if the given byte array starts with an increasing sequence of bytes of the given
-   * length, starting from the given value.
+   * length, starting from the given value. The array length must be equal to the length checked.
    *
    * @param start the starting value to use
    * @param len the target length of the sequence
@@ -284,7 +269,6 @@ public final class BufferUtils {
    *
    * @param path file path to write the data
    * @param buffer raw data
-   * @throws IOException if the operation fails
    */
   public static void writeBufferToFile(String path, byte[] buffer) throws IOException {
     try (FileOutputStream os = new FileOutputStream(path)) {
@@ -297,7 +281,6 @@ public final class BufferUtils {
    *
    * @param src the source channel
    * @param dest the destination channel
-   * @throws IOException if the copy fails
    */
   public static void fastCopy(final ReadableByteChannel src, final WritableByteChannel dest)
       throws IOException {
@@ -315,6 +298,16 @@ public final class BufferUtils {
     while (buffer.hasRemaining()) {
       dest.write(buffer);
     }
+  }
+
+  /**
+   * Gets the unsigned byte value of an integer. Useful for comparing to the result of reading
+   * from an input stream.
+   * @param i the integer to convert
+   * @return the integer value after casting as an unsigned byte
+   */
+  public static int intAsUnsignedByteValue(int i) {
+    return ((byte) i) & 0xFF;
   }
 
   /**

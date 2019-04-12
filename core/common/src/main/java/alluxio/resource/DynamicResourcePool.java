@@ -12,21 +12,20 @@
 package alluxio.resource;
 
 import alluxio.Constants;
-import alluxio.clock.Clock;
 import alluxio.clock.SystemClock;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
-import io.netty.util.internal.chmv8.ConcurrentHashMapV8;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -47,16 +46,16 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public abstract class DynamicResourcePool<T> implements Pool<T> {
-  protected static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(DynamicResourcePool.class);
 
   /**
    * A wrapper on the resource to include the last time at which it was used.
    *
-   * @param <T> the resource type
+   * @param <R> the resource type
    */
-  protected class ResourceInternal<T> {
+  protected class ResourceInternal<R> {
     /** The resource. */
-    private T mResource;
+    private R mResource;
 
     /** The last access time in ms. */
     private long mLastAccessTimeMs;
@@ -80,7 +79,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
      *
      * @param resource the resource
      */
-    public ResourceInternal(T resource) {
+    public ResourceInternal(R resource) {
       mResource = resource;
       mLastAccessTimeMs = mClock.millis();
     }
@@ -220,8 +219,8 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
   // put/delete operations are guarded by "mLock" so that we can control its size to be within
   // a [min, max] range. mLock is reused for simplicity. A separate lock can be used if we see
   // any performance overhead.
-  private final ConcurrentHashMapV8<T, ResourceInternal<T>> mResources =
-      new ConcurrentHashMapV8<>(32);
+  private final ConcurrentHashMap<T, ResourceInternal<T>> mResources =
+      new ConcurrentHashMap<>(32);
 
   // Thread to scan mAvailableResources to close those resources that are old.
   private ScheduledExecutorService mExecutor;
@@ -244,7 +243,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
     mGcFuture = mExecutor.scheduleAtFixedRate(new Runnable() {
       @Override
       public void run() {
-        List<T> resourcesToGc = new ArrayList<T>();
+        List<T> resourcesToGc = new ArrayList<>();
 
         try {
           mLock.lock();
@@ -271,26 +270,28 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
 
         for (T resource : resourcesToGc) {
           LOG.info("Resource {} is garbage collected.", resource);
-          closeResource(resource);
+          try {
+            closeResource(resource);
+          } catch (IOException e) {
+            LOG.warn("Failed to close resource {}.", resource, e);
+          }
         }
       }
     }, options.getInitialDelayMs(), options.getGcIntervalMs(), TimeUnit.MILLISECONDS);
   }
 
   /**
-   * Acquire a resource of type {code T} from the pool.
+   * Acquires a resource of type {code T} from the pool.
    *
    * @return the acquired resource
-   * @throws IOException if it fails to acquire because of the failure to create a new resource
-   * @throws InterruptedException if this thread is interrupted
    */
   @Override
-  public T acquire() throws IOException, InterruptedException {
+  public T acquire() throws IOException {
     try {
       return acquire(100  /* no timeout */, TimeUnit.DAYS);
     } catch (TimeoutException e) {
       // Never should timeout in acquire().
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
@@ -303,13 +304,10 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
    * @param time an amount of time to wait
    * @param unit the unit to use for time
    * @return a resource taken from the pool
-   * @throws IOException if it fails to acquire because of the failure to create a new resource
    * @throws TimeoutException if it fails to acquire because of time out
-   * @throws InterruptedException if this thread is interrupted
    */
   @Override
-  public T acquire(long time, TimeUnit unit)
-      throws IOException, TimeoutException, InterruptedException {
+  public T acquire(long time, TimeUnit unit) throws TimeoutException, IOException {
     long endTimeMs = mClock.millis() + unit.toMillis(time);
 
     // Try to take a resource without blocking
@@ -338,9 +336,16 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
           break;
         }
         long currTimeMs = mClock.millis();
-        if (currTimeMs >= endTimeMs || !mNotEmpty
-            .await(endTimeMs - currTimeMs, TimeUnit.MILLISECONDS)) {
-          throw new TimeoutException("Acquire resource times out.");
+        try {
+          // one should use t1-t0<0, not t1<t0, because of the possibility of numerical overflow.
+          // For further detail see: https://docs.oracle.com/javase/8/docs/api/java/lang/System.html
+          if (endTimeMs - currTimeMs <= 0 || !mNotEmpty
+              .await(endTimeMs - currTimeMs, TimeUnit.MILLISECONDS)) {
+            throw new TimeoutException("Acquire resource times out.");
+          }
+        } catch (InterruptedException e) {
+          // Restore the interrupt flag so that it can be handled later.
+          Thread.currentThread().interrupt();
         }
       }
     } finally {
@@ -382,7 +387,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
    * Closes the pool and clears all the resources. The resource pool should not be used after this.
    */
   @Override
-  public void close() {
+  public void close() throws IOException {
     try {
       mLock.lock();
       if (mAvailableResources.size() != mResources.size()) {
@@ -390,7 +395,7 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
             mResources.size() - mAvailableResources.size());
       }
       for (ResourceInternal<T> resourceInternal : mAvailableResources) {
-        closeResourceSync(resourceInternal.mResource);
+        closeResource(resourceInternal.mResource);
       }
       mAvailableResources.clear();
     } finally {
@@ -458,18 +463,15 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
   }
 
   /**
-   * Check whether the resource is healthy. If not retry. When this called, the resource
+   * Checks whether the resource is healthy. If not retry. When this called, the resource
    * is not in mAvailableResources.
    *
    * @param resource the resource to check
    * @param endTimeMs the end time to wait till
    * @return the resource
-   * @throws IOException if it fails to create a resource
    * @throws TimeoutException if it times out to wait for a resource
-   * @throws InterruptedException if this thread is interrupted
    */
-  private T checkHealthyAndRetry(T resource, long endTimeMs)
-      throws IOException, TimeoutException, InterruptedException {
+  private T checkHealthyAndRetry(T resource, long endTimeMs) throws TimeoutException, IOException {
     if (isHealthy(resource)) {
       return resource;
     } else {
@@ -502,21 +504,12 @@ public abstract class DynamicResourcePool<T> implements Pool<T> {
    *
    * @param resource the resource to close
    */
-  protected abstract void closeResource(T resource);
-
-  /**
-   * Similar as above but this guarantees that the resource is closed after the function returns
-   * unless it fails to close.
-   *
-   * @param resource the resource to close
-   */
-  protected abstract void closeResourceSync(T resource);
+  protected abstract void closeResource(T resource) throws IOException;
 
   /**
    * Creates a new resource.
    *
    * @return the newly created resource
-   * @throws IOException if it fails to create the resource
    */
   protected abstract T createNewResource() throws IOException;
 }

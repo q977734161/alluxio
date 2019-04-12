@@ -12,13 +12,16 @@
 package alluxio.examples;
 
 import alluxio.AlluxioURI;
-import alluxio.Constants;
 import alluxio.RuntimeConstants;
 import alluxio.cli.CliUtils;
 import alluxio.client.file.FileInStream;
 import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
 import alluxio.client.file.URIStatus;
+import alluxio.conf.InstancedConfiguration;
 import alluxio.exception.AlluxioException;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.util.ConfigurationUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,23 +36,26 @@ import java.util.concurrent.Callable;
  * An example to show to how use Alluxio's API.
  */
 public class BasicCheckpoint implements Callable<Boolean> {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(BasicCheckpoint.class);
 
   private final String mFileFolder;
   private final int mNumFiles;
+  private final FileSystemContext mFsContext;
 
   /**
    * @param fileFolder folder to use for the files
    * @param numFiles the number of files
+   * @param fsContext filesystem context to use for client operations
    */
-  public BasicCheckpoint(String fileFolder, int numFiles) {
+  public BasicCheckpoint(String fileFolder, int numFiles, FileSystemContext fsContext) {
     mFileFolder = fileFolder;
     mNumFiles = numFiles;
+    mFsContext = fsContext;
   }
 
   @Override
   public Boolean call() throws Exception {
-    FileSystem fs = FileSystem.Factory.get();
+    FileSystem fs = FileSystem.Factory.create(mFsContext);
     writeFile(fs);
     return readFile(fs);
   }
@@ -82,7 +88,8 @@ public class BasicCheckpoint implements Callable<Boolean> {
       buf.flip();
       AlluxioURI filePath = new AlluxioURI(mFileFolder + "/part-" + i);
       LOG.debug("Writing data to {}", filePath);
-      OutputStream os = fs.createFile(filePath);
+      OutputStream os =
+          fs.createFile(filePath, CreateFilePOptions.newBuilder().setRecursive(true).build());
       os.write(buf.array());
       os.close();
     }
@@ -93,7 +100,6 @@ public class BasicCheckpoint implements Callable<Boolean> {
    * Usage: {@code java -cp <ALLUXIO-VERSION> alluxio.examples.BasicCheckpoint <FileFolder> <Files>}
    *
    * @param args the folder for the files and the files to use
-   * @throws IOException if the example fails to run
    */
   public static void main(String[] args) throws IOException {
     if (args.length != 2) {
@@ -101,8 +107,10 @@ public class BasicCheckpoint implements Callable<Boolean> {
           + " alluxio.examples.BasicCheckpoint <FileFolder> <Files>");
       System.exit(-1);
     }
-
-    boolean result = CliUtils.runExample(new BasicCheckpoint(args[0], Integer.parseInt(args[1])));
+    FileSystemContext fsContext =
+        FileSystemContext.create(new InstancedConfiguration(ConfigurationUtils.defaults()));
+    boolean result = CliUtils.runExample(new BasicCheckpoint(args[0], Integer.parseInt(args[1]),
+        fsContext));
     System.exit(result ? 0 : 1);
   }
 }

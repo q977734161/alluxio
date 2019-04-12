@@ -11,14 +11,17 @@
 
 package alluxio.heartbeat;
 
-import alluxio.Constants;
-import alluxio.clock.Clock;
 import alluxio.clock.SystemClock;
 import alluxio.time.Sleeper;
 import alluxio.time.ThreadSleeper;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Clock;
+import java.time.Duration;
+
+import javax.annotation.concurrent.NotThreadSafe;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -41,8 +44,8 @@ public final class SleepingTimer implements HeartbeatTimer {
    * @param intervalMs the heartbeat interval
    */
   public SleepingTimer(String threadName, long intervalMs) {
-    this(threadName, intervalMs, LoggerFactory.getLogger(Constants.LOGGER_TYPE),
-        new SystemClock(), new ThreadSleeper());
+    this(threadName, intervalMs, LoggerFactory.getLogger(SleepingTimer.class),
+        new SystemClock(), ThreadSleeper.INSTANCE);
   }
 
   /**
@@ -75,7 +78,7 @@ public final class SleepingTimer implements HeartbeatTimer {
         mLogger.warn("{} last execution took {} ms. Longer than the interval {}", mThreadName,
             executionTimeMs, mIntervalMs);
       } else {
-        mSleeper.sleep(mIntervalMs - executionTimeMs);
+        mSleeper.sleep(Duration.ofMillis(mIntervalMs - executionTimeMs));
       }
     }
     mPreviousTickMs = mClock.millis();

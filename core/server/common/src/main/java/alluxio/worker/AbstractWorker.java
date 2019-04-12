@@ -16,6 +16,7 @@ import com.google.common.base.Preconditions;
 import java.util.concurrent.ExecutorService;
 
 import javax.annotation.concurrent.NotThreadSafe;
+
 /**
  * This is the base class for all workers, and contains common functionality.
  */
@@ -28,7 +29,7 @@ public abstract class AbstractWorker implements Worker {
    * @param executorService executor service to use internally
    */
   protected AbstractWorker(ExecutorService executorService)  {
-    mExecutorService = Preconditions.checkNotNull(executorService);
+    mExecutorService = Preconditions.checkNotNull(executorService, "executorService");
   }
 
   /**

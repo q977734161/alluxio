@@ -11,6 +11,10 @@
 
 package alluxio.worker.block.io;
 
+import alluxio.network.protocol.databuffer.DataBuffer;
+
+import io.netty.buffer.ByteBuf;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -23,6 +27,7 @@ import java.nio.channels.WritableByteChannel;
  */
 public final class MockBlockWriter implements BlockWriter {
   private final ByteArrayOutputStream mOutputStream;
+  private long mPosition;
 
   /**
    * Constructs a mock block writer which will remember all bytes written to it.
@@ -34,6 +39,7 @@ public final class MockBlockWriter implements BlockWriter {
   @Override
   public void close() throws IOException {
     mOutputStream.close();
+    mPosition = -1;
   }
 
   @Override
@@ -41,6 +47,23 @@ public final class MockBlockWriter implements BlockWriter {
     byte[] bytes = new byte[inputBuf.remaining()];
     inputBuf.get(bytes);
     mOutputStream.write(bytes);
+    mPosition += bytes.length;
+    return bytes.length;
+  }
+
+  @Override
+  public long append(ByteBuf buf) throws IOException {
+    long bytesWritten = buf.readBytes(getChannel(), buf.readableBytes());
+    mPosition += bytesWritten;
+    return bytesWritten;
+  }
+
+  @Override
+  public long append(DataBuffer buffer) throws IOException {
+    byte[] bytes = new byte[buffer.readableBytes()];
+    buffer.readBytes(bytes, 0, bytes.length);
+    mOutputStream.write(bytes);
+    mPosition += bytes.length;
     return bytes.length;
   }
 
@@ -78,6 +101,11 @@ public final class MockBlockWriter implements BlockWriter {
         mChannel.close();
       }
     };
+  }
+
+  @Override
+  public long getPosition() {
+    return mPosition;
   }
 
   /**

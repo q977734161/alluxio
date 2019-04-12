@@ -11,9 +11,9 @@
 
 package alluxio.mesos;
 
-import alluxio.Constants;
 import alluxio.cli.Format;
-import alluxio.underfs.UnderFileSystemRegistry;
+import alluxio.conf.ServerConfiguration;
+import alluxio.underfs.UnderFileSystemFactoryRegistry;
 import alluxio.worker.AlluxioWorker;
 
 import org.apache.mesos.Executor;
@@ -28,10 +28,13 @@ import javax.annotation.concurrent.ThreadSafe;
 /**
  * {@link AlluxioWorkerExecutor} is an implementation of a Mesos executor responsible for
  * starting the Alluxio worker.
+ *
+ * @deprecated since version 2.0
  */
 @ThreadSafe
+@Deprecated
 public class AlluxioWorkerExecutor implements Executor {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(AlluxioWorkerExecutor.class);
 
   /**
    * Creates a new {@link AlluxioWorkerExecutor}.
@@ -73,9 +76,9 @@ public class AlluxioWorkerExecutor implements Executor {
           LOG.info("Launching task {}", task.getTaskId().getValue());
 
           Thread.currentThread().setContextClassLoader(
-              UnderFileSystemRegistry.class.getClassLoader());
+              UnderFileSystemFactoryRegistry.class.getClassLoader());
 
-          Format.format("worker");
+          Format.format(Format.Mode.WORKER, ServerConfiguration.global());
           AlluxioWorker.main(new String[] {});
 
           status =
@@ -111,7 +114,6 @@ public class AlluxioWorkerExecutor implements Executor {
    * Starts the Alluxio worker executor.
    *
    * @param args command-line arguments
-   * @throws Exception if the executor encounters an unrecoverable error
    */
   public static void main(String[] args) throws Exception {
     MesosExecutorDriver driver = new MesosExecutorDriver(new AlluxioWorkerExecutor());

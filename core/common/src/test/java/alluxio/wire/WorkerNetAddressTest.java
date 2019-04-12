@@ -12,8 +12,9 @@
 package alluxio.wire;
 
 import alluxio.util.CommonUtils;
+import alluxio.grpc.GrpcUtils;
 
-import org.codehaus.jackson.map.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -31,9 +32,9 @@ public class WorkerNetAddressTest {
   }
 
   @Test
-  public void thrift() {
+  public void proto() {
     WorkerNetAddress workerNetAddress = createRandom();
-    WorkerNetAddress other = ThriftUtils.fromThrift(ThriftUtils.toThrift(workerNetAddress));
+    WorkerNetAddress other = GrpcUtils.fromProto(GrpcUtils.toProto(workerNetAddress));
     checkEquality(workerNetAddress, other);
   }
 
@@ -42,6 +43,7 @@ public class WorkerNetAddressTest {
     Assert.assertEquals(a.getRpcPort(), b.getRpcPort());
     Assert.assertEquals(a.getDataPort(), b.getDataPort());
     Assert.assertEquals(a.getWebPort(), b.getWebPort());
+    Assert.assertEquals(a.getTieredIdentity(), b.getTieredIdentity());
     Assert.assertEquals(a, b);
   }
 
@@ -53,11 +55,13 @@ public class WorkerNetAddressTest {
     int rpcPort = random.nextInt();
     int dataPort = random.nextInt();
     int webPort = random.nextInt();
+    TieredIdentity identity = TieredIdentityTest.createRandomTieredIdentity();
 
     result.setHost(host);
     result.setRpcPort(rpcPort);
     result.setDataPort(dataPort);
     result.setWebPort(webPort);
+    result.setTieredIdentity(identity);
 
     return result;
   }

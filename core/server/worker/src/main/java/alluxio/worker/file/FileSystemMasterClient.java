@@ -13,50 +13,46 @@ package alluxio.worker.file;
 
 import alluxio.AbstractMasterClient;
 import alluxio.Constants;
-import alluxio.exception.AlluxioException;
-import alluxio.exception.ConnectionFailedException;
-import alluxio.thrift.AlluxioService;
-import alluxio.thrift.AlluxioTException;
-import alluxio.thrift.FileSystemCommand;
-import alluxio.thrift.FileSystemMasterWorkerService;
+import alluxio.grpc.FileSystemCommand;
+import alluxio.grpc.FileSystemHeartbeatPOptions;
+import alluxio.grpc.FileSystemHeartbeatPRequest;
+import alluxio.grpc.FileSystemMasterWorkerServiceGrpc;
+import alluxio.grpc.GetFileInfoPRequest;
+import alluxio.grpc.GetPinnedFileIdsPRequest;
+import alluxio.grpc.GetUfsInfoPRequest;
+import alluxio.grpc.ServiceType;
+import alluxio.grpc.UfsInfo;
+import alluxio.master.MasterClientContext;
+import alluxio.grpc.GrpcUtils;
 import alluxio.wire.FileInfo;
-import alluxio.wire.ThriftUtils;
-
-import org.apache.thrift.TException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.net.InetSocketAddress;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
- * A wrapper for the thrift client to interact with the file system master, used by Alluxio worker.
- * <p/>
- * Since thrift clients are not thread safe, this class is a wrapper to provide thread safety, and
- * to provide retries.
+ * A wrapper for the gRPC client to interact with the file system master, used by Alluxio worker.
  */
 @ThreadSafe
 public final class FileSystemMasterClient extends AbstractMasterClient {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
-
-  private FileSystemMasterWorkerService.Client mClient = null;
+  private FileSystemMasterWorkerServiceGrpc.FileSystemMasterWorkerServiceBlockingStub mClient =
+      null;
 
   /**
    * Creates a instance of {@link FileSystemMasterClient}.
    *
-   * @param masterAddress the master address
+   * @param conf master client configuration
    */
-  public FileSystemMasterClient(InetSocketAddress masterAddress) {
-    super(null, masterAddress);
+  public FileSystemMasterClient(MasterClientContext conf) {
+    super(conf);
   }
 
   @Override
-  protected AlluxioService.Client getClient() {
-    return mClient;
+  protected ServiceType getRemoteServiceType() {
+    return ServiceType.FILE_SYSTEM_MASTER_WORKER_SERVICE;
   }
 
   @Override
@@ -71,54 +67,61 @@ public final class FileSystemMasterClient extends AbstractMasterClient {
 
   @Override
   protected void afterConnect() throws IOException {
-    mClient = new FileSystemMasterWorkerService.Client(mProtocol);
+    mClient = FileSystemMasterWorkerServiceGrpc.newBlockingStub(mChannel);
   }
 
   /**
    * @param fileId the id of the file for which to get the {@link FileInfo}
    * @return the file info for the given file id
-   * @throws AlluxioException if an Alluxio error occurs
-   * @throws IOException if an I/O error occurs
    */
-  public synchronized FileInfo getFileInfo(final long fileId) throws AlluxioException, IOException {
-    return retryRPC(new RpcCallableThrowsAlluxioTException<FileInfo>() {
-      @Override
-      public FileInfo call() throws TException {
-        return ThriftUtils.fromThrift(mClient.getFileInfo(fileId));
-      }
-    });
+  public FileInfo getFileInfo(final long fileId) throws IOException {
+    return retryRPC(() -> GrpcUtils.fromProto(mClient
+        .getFileInfo(GetFileInfoPRequest.newBuilder().setFileId(fileId).build()).getFileInfo()));
   }
 
   /**
    * @return the set of pinned file ids
-   * @throws ConnectionFailedException if network connection failed
-   * @throws IOException if an I/O error occurs
    */
-  public synchronized Set<Long> getPinList() throws ConnectionFailedException, IOException {
-    return retryRPC(new RpcCallable<Set<Long>>() {
-      @Override
-      public Set<Long> call() throws TException {
-        return mClient.getPinIdList();
-      }
-    });
+  public Set<Long> getPinList() throws IOException {
+    return retryRPC(() -> new HashSet<>(mClient
+        .getPinnedFileIds(GetPinnedFileIdsPRequest.newBuilder().build()).getPinnedFileIdsList()));
   }
 
   /**
-   * Heartbeats to the worker. It also carries command for the worker to persist the given files.
+   * @param mountId the id of the mount
+   * @return the ufs information for the give ufs
+   * @throws IOException if an I/O error occurs
+   */
+  public UfsInfo getUfsInfo(final long mountId) throws IOException {
+    return retryRPC(() -> mClient
+        .getUfsInfo(GetUfsInfoPRequest.newBuilder().setMountId(mountId).build()).getUfsInfo());
+  }
+
+  /**
+   * Heartbeats to the master. It also carries command for the worker to persist the given files.
    *
    * @param workerId the id of the worker that heartbeats
    * @param persistedFiles the files which have been persisted since the last heartbeat
    * @return the command for file system worker
-   * @throws IOException if file persistence fails
-   * @throws AlluxioException if an error occurs on Alluxio master
    */
-  public synchronized FileSystemCommand heartbeat(final long workerId,
-      final List<Long> persistedFiles) throws IOException, AlluxioException {
-    return retryRPC(new RpcCallableThrowsAlluxioTException<FileSystemCommand>() {
-      @Override
-      public FileSystemCommand call() throws AlluxioTException, TException {
-        return mClient.heartbeat(workerId, persistedFiles);
-      }
-    });
+  public FileSystemCommand heartbeat(final long workerId,
+      final List<Long> persistedFiles) throws IOException {
+    return heartbeat(workerId, persistedFiles, FileSystemHeartbeatPOptions.newBuilder().build());
+  }
+
+  /**
+   * Heartbeats to the master. It also carries command for the worker to persist the given files.
+   *
+   * @param workerId the id of the worker that heartbeats
+   * @param persistedFiles the files which have been persisted since the last heartbeat
+   * @param options heartbeat options
+   * @return the command for file system worker
+   */
+  public FileSystemCommand heartbeat(final long workerId,
+      final List<Long> persistedFiles, final FileSystemHeartbeatPOptions options)
+      throws IOException {
+    return retryRPC(() -> mClient.fileSystemHeartbeat(FileSystemHeartbeatPRequest.newBuilder()
+        .setWorkerId(workerId).addAllPersistedFiles(persistedFiles).setOptions(options).build())
+        .getCommand());
   }
 }

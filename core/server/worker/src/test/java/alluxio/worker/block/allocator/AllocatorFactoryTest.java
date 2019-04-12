@@ -11,9 +11,8 @@
 
 package alluxio.worker.block.allocator;
 
-import alluxio.Configuration;
-import alluxio.ConfigurationTestUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.worker.block.BlockMetadataManagerView;
 import alluxio.worker.block.TieredBlockStoreTestUtils;
 
@@ -28,7 +27,7 @@ import org.junit.rules.TemporaryFolder;
  * Test {@link Allocator.Factory} by passing different allocate strategy class names with alluxio
  * conf and test if it generates the correct {@link Allocator} instance.
  */
-public class AllocatorFactoryTest {
+public final class AllocatorFactoryTest {
   private BlockMetadataManagerView mManagerView;
 
   /** Rule to create a new temporary folder during each test. */
@@ -46,7 +45,7 @@ public class AllocatorFactoryTest {
 
   @After
   public void after() {
-    ConfigurationTestUtils.resetConfiguration();
+    ServerConfiguration.reset();
   }
 
   /**
@@ -55,7 +54,7 @@ public class AllocatorFactoryTest {
    */
   @Test
   public void createGreedyAllocator() {
-    Configuration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, GreedyAllocator.class.getName());
+    ServerConfiguration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, GreedyAllocator.class.getName());
     Allocator allocator = Allocator.Factory.create(mManagerView);
     Assert.assertTrue(allocator instanceof GreedyAllocator);
   }
@@ -66,7 +65,7 @@ public class AllocatorFactoryTest {
    */
   @Test
   public void createMaxFreeAllocator() {
-    Configuration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, MaxFreeAllocator.class.getName());
+    ServerConfiguration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, MaxFreeAllocator.class.getName());
     Allocator allocator = Allocator.Factory.create(mManagerView);
     Assert.assertTrue(allocator instanceof MaxFreeAllocator);
   }
@@ -77,7 +76,8 @@ public class AllocatorFactoryTest {
    */
   @Test
   public void createRoundRobinAllocator() {
-    Configuration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, RoundRobinAllocator.class.getName());
+    ServerConfiguration.set(PropertyKey.WORKER_ALLOCATOR_CLASS,
+        RoundRobinAllocator.class.getName());
     Allocator allocator = Allocator.Factory.create(mManagerView);
     Assert.assertTrue(allocator instanceof RoundRobinAllocator);
   }

@@ -49,8 +49,8 @@ public class S3AInputStream extends InputStream {
   }
 
   /**
-   * Constructor for an input stream of an object in s3 using the aws-sdk implementation to read
-   * the data. The stream will be positioned at the specified position.
+   * Constructor for an input stream of an object in s3 using the aws-sdk implementation to read the
+   * data. The stream will be positioned at the specified position.
    *
    * @param bucketName the bucket the object resides in
    * @param key the path of the object to read

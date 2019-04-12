@@ -11,6 +11,8 @@
 
 package alluxio;
 
+import alluxio.conf.PropertyKey;
+
 import java.util.List;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -26,7 +28,7 @@ public class MasterStorageTierAssoc extends StorageTierAssoc {
    */
   public MasterStorageTierAssoc() {
     super(PropertyKey.MASTER_TIERED_STORE_GLOBAL_LEVELS,
-        PropertyKeyFormat.MASTER_TIERED_STORE_GLOBAL_LEVEL_ALIAS_FORMAT);
+        PropertyKey.Template.MASTER_TIERED_STORE_GLOBAL_LEVEL_ALIAS);
   }
 
   /**

@@ -11,23 +11,22 @@
 
 package alluxio.worker.block.allocator;
 
-import alluxio.Configuration;
-import alluxio.ConfigurationTestUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 
 import org.junit.Test;
 
 /**
  * Unit tests for {@link GreedyAllocator}.
  */
-public class GreedyAllocatorTest extends AllocatorTestBase {
+public final class GreedyAllocatorTest extends AllocatorTestBase {
 
   /**
    * Tests that blocks are allocated in the first storage directory which has enough free space.
    */
   @Test
   public void allocateBlock() throws Exception {
-    Configuration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, GreedyAllocator.class.getName());
+    ServerConfiguration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, GreedyAllocator.class.getName());
     mAllocator = Allocator.Factory.create(getManagerView());
     //
     // idx | tier1 | tier2 | tier3
@@ -138,6 +137,6 @@ public class GreedyAllocatorTest extends AllocatorTestBase {
     //  1               ├─── 1300   <--- alloc
     //  2               └─── 3000
     //
-    ConfigurationTestUtils.resetConfiguration();
+    ServerConfiguration.reset();
   }
 }

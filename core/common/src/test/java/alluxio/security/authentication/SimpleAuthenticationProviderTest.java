@@ -11,12 +11,14 @@
 
 package alluxio.security.authentication;
 
+import alluxio.security.authentication.plain.SimpleAuthenticationProvider;
+
 import org.junit.Test;
 
 /**
  * Tests the {@link SimpleAuthenticationProvider} class.
  */
-public class SimpleAuthenticationProviderTest {
+public final class SimpleAuthenticationProviderTest {
 
   /**
    * Tests the {@link SimpleAuthenticationProvider#authenticate(String, String)}.

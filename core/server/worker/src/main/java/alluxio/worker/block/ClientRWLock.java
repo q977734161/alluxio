@@ -11,8 +11,8 @@
 
 package alluxio.worker.block;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -32,9 +32,13 @@ import javax.annotation.concurrent.ThreadSafe;
 public final class ClientRWLock implements ReadWriteLock {
   /** Total number of permits. This value decides the max number of concurrent readers. */
   private static final int MAX_AVAILABLE =
-          Configuration.getInt(PropertyKey.WORKER_TIERED_STORE_BLOCK_LOCK_READERS);
-  /** Underlying Semaphore. */
-  private final Semaphore mAvailable = new Semaphore(MAX_AVAILABLE, true);
+          ServerConfiguration.getInt(PropertyKey.WORKER_TIERED_STORE_BLOCK_LOCK_READERS);
+  /**
+   * Uses the unfair lock to prevent a read lock that fails to release from locking the block
+   * forever and thus blocking all the subsequent write access.
+   * See https://alluxio.atlassian.net/browse/ALLUXIO-2636.
+   */
+  private final Semaphore mAvailable = new Semaphore(MAX_AVAILABLE, false);
   /** Reference count. */
   private AtomicInteger mReferences = new AtomicInteger();
 
@@ -99,12 +103,8 @@ public final class ClientRWLock implements ReadWriteLock {
     }
 
     @Override
-    public boolean tryLock(long time, TimeUnit unit) {
-      try {
-        return mAvailable.tryAcquire(mPermits, time, unit);
-      } catch (InterruptedException e) {
-        return false;
-      }
+    public boolean tryLock(long time, TimeUnit unit) throws InterruptedException {
+      return mAvailable.tryAcquire(mPermits, time, unit);
     }
 
     @Override

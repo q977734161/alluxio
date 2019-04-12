@@ -12,10 +12,12 @@
 package alluxio.underfs;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
-import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.collections.Pair;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.ExceptionMessage;
+import alluxio.retry.ExponentialBackoffRetry;
+import alluxio.retry.RetryPolicy;
 import alluxio.underfs.options.CreateOptions;
 import alluxio.underfs.options.DeleteOptions;
 import alluxio.underfs.options.FileLocationOptions;
@@ -23,8 +25,10 @@ import alluxio.underfs.options.ListOptions;
 import alluxio.underfs.options.MkdirsOptions;
 import alluxio.underfs.options.OpenOptions;
 import alluxio.util.CommonUtils;
+import alluxio.util.executor.ExecutorServiceFactories;
 import alluxio.util.io.PathUtils;
 
+import com.google.common.base.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,11 +36,19 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 
+import javax.annotation.Nullable;
+import javax.annotation.concurrent.NotThreadSafe;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -45,7 +57,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(ObjectUnderFileSystem.class);
 
   /** Default maximum length for a single listing query. */
   private static final int DEFAULT_MAX_LISTING_CHUNK_LENGTH = 1000;
@@ -59,25 +71,56 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    */
   protected static final String PATH_SEPARATOR = String.valueOf(PATH_SEPARATOR_CHAR);
 
+  /** Executor service used for parallel UFS operations such as bulk deletes. */
+  protected ExecutorService mExecutorService;
+
   /**
    * Constructs an {@link ObjectUnderFileSystem}.
    *
    * @param uri the {@link AlluxioURI} used to create this ufs
+   * @param ufsConf UFS configuration
    */
-  protected ObjectUnderFileSystem(AlluxioURI uri) {
-    super(uri);
+  protected ObjectUnderFileSystem(AlluxioURI uri, UnderFileSystemConfiguration ufsConf,
+      AlluxioConfiguration alluxioConf) {
+    super(uri, ufsConf, alluxioConf);
+    int numThreads = mAlluxioConf.getInt(PropertyKey.UNDERFS_OBJECT_STORE_SERVICE_THREADS);
+    mExecutorService = ExecutorServiceFactories.fixedThreadPool(
+        "alluxio-underfs-object-service-worker", numThreads).create();
   }
 
   /**
    * Information about a single object in object UFS.
    */
   protected class ObjectStatus {
-    final long mContentLength;
-    final long mLastModifiedTimeMs;
+    private static final String INVALID_CONTENT_HASH = "";
+    private static final long INVALID_CONTENT_LENGTH = -1L;
+    private static final long INVALID_MODIFIED_TIME = -1L;
 
-    public ObjectStatus(long contentLength, long lastModifiedTimeMs) {
+    private final String mContentHash;
+    private final long mContentLength;
+    private final long mLastModifiedTimeMs;
+    private final String mName;
+
+    public ObjectStatus(String name, String contentHash, long contentLength,
+        long lastModifiedTimeMs) {
+      mContentHash = contentHash;
       mContentLength = contentLength;
       mLastModifiedTimeMs = lastModifiedTimeMs;
+      mName = name;
+    }
+
+    public ObjectStatus(String name) {
+      mContentHash = INVALID_CONTENT_HASH;
+      mContentLength = INVALID_CONTENT_LENGTH;
+      mLastModifiedTimeMs = INVALID_MODIFIED_TIME;
+      mName = name;
+    }
+
+    /**
+     * @return the hash of the content
+     */
+    public String getContentHash() {
+      return mContentHash;
     }
 
     /**
@@ -97,6 +140,15 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
     public long getLastModifiedTimeMs() {
       return mLastModifiedTimeMs;
     }
+
+    /**
+     * Gets the name of the object.
+     *
+     * @return object name
+     */
+    public String getName() {
+      return mName;
+    }
   }
 
   /**
@@ -104,11 +156,11 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    */
   public interface ObjectListingChunk {
     /**
-     * Objects in a pseudo-directory which may be a file or a directory.
+     * Returns objects in a pseudo-directory which may be a file or a directory.
      *
-     * @return a list of object names
+     * @return a list of object statuses
      */
-    String[] getObjectNames();
+    ObjectStatus[] getObjectStatuses();
 
     /**
      * Use common prefixes to infer pseudo-directories in object store.
@@ -118,13 +170,185 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
     String[] getCommonPrefixes();
 
     /**
-     * Get next chunk of object listings.
+     * Gets next chunk of object listings.
      *
      * @return null if listing did not find anything or is done, otherwise return new
      * {@link ObjectListingChunk} for the next chunk
-     * @throws IOException if a non-alluxio error occurs
      */
+    @Nullable
     ObjectListingChunk getNextChunk() throws IOException;
+  }
+
+  /**
+   * Permissions in object UFS.
+   */
+  public class ObjectPermissions {
+    final String mOwner;
+    final String mGroup;
+    final short mMode;
+
+    /**
+     * Creates a new ObjectPermissions.
+     *
+     * @param owner the owner of the object
+     * @param group the group of the object
+     * @param mode the representation of the permission bits
+     */
+    public ObjectPermissions(String owner, String group, short mode) {
+      mOwner = owner;
+      mGroup = group;
+      mMode = mode;
+    }
+
+    /**
+     * @return the name of the owner
+     */
+    public String getOwner() {
+      return mOwner;
+    }
+
+    /**
+     * @return the name of the group
+     */
+    public String getGroup() {
+      return mGroup;
+    }
+
+    /**
+     * @return the short representation of the permission bits
+     */
+    public short getMode() {
+      return mMode;
+    }
+  }
+
+  /**
+   * Operations added to this buffer are performed concurrently.
+   *
+   * @param T input type for operation
+   */
+  protected abstract class OperationBuffer<T> {
+    /** A list of inputs in batches to be operated on in parallel. */
+    private ArrayList<List<T>> mBatches;
+    /** A list of the successful operations for each batch. */
+    private ArrayList<Future<List<T>>> mBatchesResult;
+    /** Buffer for a batch of inputs. */
+    private List<T> mCurrentBatchBuffer;
+    /** Total number of inputs to be operated on across batches. */
+    protected int mEntriesAdded;
+
+    /**
+     * Construct a new {@link OperationBuffer} instance.
+     */
+    protected OperationBuffer() {
+      mBatches = new ArrayList<>();
+      mBatchesResult = new ArrayList<>();
+      mCurrentBatchBuffer = new ArrayList<>();
+      mEntriesAdded = 0;
+    }
+
+    /**
+     * Get the batch size.
+     *
+     * @return a positive integer denoting the batch size
+     */
+    protected abstract int getBatchSize();
+
+    /**
+     * Operate on a list of input type {@link T}.
+     *
+     * @param paths the list of input type {@link T} to operate on
+     * @return list of inputs for successful operations
+     */
+    protected abstract List<T> operate(List<T> paths) throws IOException;
+
+    /**
+     * Add a new input to be operated on.
+     *
+     * @param input the input to operate on
+     * @throws IOException if a non-Alluxio error occurs
+     */
+    public void add(T input) throws IOException {
+      if (mCurrentBatchBuffer.size() == getBatchSize()) {
+        // Batch is full
+        submitBatch();
+      }
+      mCurrentBatchBuffer.add(input);
+      mEntriesAdded++;
+    }
+
+    /**
+     * Get the combined result from all batches.
+     *
+     * @return a list of inputs for successful operations
+     * @throws IOException if a non-Alluxio error occurs
+     */
+    public List<T> getResult() throws IOException {
+      submitBatch();
+      List<T> result = new ArrayList<>();
+      for (Future<List<T>> list : mBatchesResult) {
+        try {
+          result.addAll(list.get());
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          // If operation was interrupted do not add to successfully deleted list
+          LOG.warn(
+              "{}: Interrupted while waiting for the result of batch operation. UFS and Alluxio "
+                  + "state may be inconsistent. Error: {}",
+              getClass().getName(), e.getMessage());
+        } catch (ExecutionException e) {
+          // If operation failed to execute do not add to successfully deleted list
+          LOG.warn(
+              "{}: A batch operation failed. UFS and Alluxio state may be inconsistent. Error: {}",
+              getClass().getName(), e.getMessage());
+        }
+      }
+      return result;
+    }
+
+    /**
+     * Process the current batch asynchronously.
+     */
+    private void submitBatch() throws IOException {
+      if (mCurrentBatchBuffer.size() != 0) {
+        int batchNumber = mBatches.size();
+        mBatches.add(new ArrayList<>(mCurrentBatchBuffer));
+        mCurrentBatchBuffer.clear();
+        mBatchesResult.add(batchNumber,
+            mExecutorService.submit(new OperationThread(mBatches.get(batchNumber))));
+      }
+    }
+
+    /**
+     * Thread class to operate on a batch of objects.
+     */
+    @NotThreadSafe
+    protected class OperationThread implements Callable<List<T>> {
+      List<T> mBatch;
+
+      /**
+       * Operate on a batch of inputs.
+       *
+       * @param batch a list of inputs for the current batch
+       */
+      public OperationThread(List<T> batch) {
+        mBatch = batch;
+      }
+
+      @Override
+      public List<T> call() {
+        try {
+          return operate(mBatch);
+        } catch (IOException e) {
+          // Do not append to success list
+          return Collections.emptyList();
+        }
+      }
+    }
+  }
+
+  @Override
+  public void cleanup() throws IOException {
   }
 
   @Override
@@ -148,14 +372,30 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
   }
 
   @Override
+  public OutputStream createNonexistingFile(String path) throws IOException {
+    return retryOnException(() -> create(path), () -> "create file " + path);
+  }
+
+  @Override
+  public OutputStream createNonexistingFile(String path, CreateOptions options) throws IOException {
+    return retryOnException(() -> create(path, options),
+        () -> "create file " + path + " with options " + options);
+  }
+
+  @Override
   public boolean deleteFile(String path) throws IOException {
     return deleteObject(stripPrefixIfPresent(path));
   }
 
   @Override
+  public boolean deleteExistingFile(String path) throws IOException {
+    return retryOnFalse(() -> deleteFile(path), () -> "delete existing file " + path);
+  }
+
+  @Override
   public boolean deleteDirectory(String path, DeleteOptions options) throws IOException {
     if (!options.isRecursive()) {
-      UnderFileStatus[] children = listInternal(path, ListOptions.defaults());
+      UfsStatus[] children = listInternal(path, ListOptions.defaults());
       if (children == null) {
         LOG.error("Unable to delete path because {} is not a directory ", path);
         return false;
@@ -165,33 +405,66 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
                 + "recursive as true in order to delete non empty directories.", path);
         return false;
       }
-    } else {
-      // Delete children
-      UnderFileStatus[] pathsToDelete =
-          listInternal(path, ListOptions.defaults().setRecursive(true));
-      if (pathsToDelete == null) {
-        LOG.error("Unable to delete {} because listInternal returns null", path);
-        return false;
-      }
-      for (UnderFileStatus pathToDelete : pathsToDelete) {
-        // If we fail to deleteObject one file, stop
-        String pathKey = stripPrefixIfPresent(PathUtils.concatPath(path, pathToDelete.getName()));
-        if (pathToDelete.isDirectory()) {
-          if (!deleteObject(convertToFolderName(pathKey))) {
-            // If path is a directory, it is possible that it was not created through Alluxio and no
-            // zero-byte breadcrumb exists
-            LOG.warn("Failed to delete directory {}", pathToDelete.getName());
-          }
-        } else {
-          if (!deleteObject(pathKey)) {
-            LOG.error("Failed to delete file {}", pathToDelete.getName());
-            return false;
-          }
-        }
+      // Delete the directory itself
+      return deleteObject(stripPrefixIfPresent(convertToFolderName(path)));
+    }
+
+    // Delete children
+    DeleteBuffer deleteBuffer = new DeleteBuffer();
+    UfsStatus[] pathsToDelete = listInternal(path, ListOptions.defaults().setRecursive(true));
+    if (pathsToDelete == null) {
+      LOG.warn("Unable to delete {} because listInternal returns null", path);
+      return false;
+    }
+    for (UfsStatus pathToDelete : pathsToDelete) {
+      String pathKey = stripPrefixIfPresent(PathUtils.concatPath(path, pathToDelete.getName()));
+      if (pathToDelete.isDirectory()) {
+        deleteBuffer.add(convertToFolderName(pathKey));
+      } else {
+        deleteBuffer.add(pathKey);
       }
     }
-    // Delete the directory itself
-    return deleteObject(stripPrefixIfPresent(convertToFolderName(path)));
+    deleteBuffer.add(stripPrefixIfPresent(convertToFolderName(path)));
+    int filesDeleted = deleteBuffer.getResult().size();
+    if (filesDeleted != deleteBuffer.mEntriesAdded) {
+      LOG.warn("Failed to delete directory, successfully deleted {} files out of {}.",
+          filesDeleted, deleteBuffer.mEntriesAdded);
+      return false;
+    }
+    return true;
+  }
+
+  @Override
+  public boolean deleteExistingDirectory(String path) throws IOException {
+    return retryOnFalse(() -> deleteDirectory(path), () -> "delete directory " + path);
+  }
+
+  @Override
+  public boolean deleteExistingDirectory(String path, DeleteOptions options) throws IOException {
+    return retryOnFalse(() -> deleteDirectory(path, options),
+        () -> "delete directory " + path + " with options " + options);
+  }
+
+  /**
+   * Object keys added to a {@link DeleteBuffer} will be deleted in batches.
+   */
+  @NotThreadSafe
+  protected class DeleteBuffer extends OperationBuffer<String> {
+    /**
+     * Construct a new {@link DeleteBuffer} instance.
+     */
+    public DeleteBuffer() {}
+
+    @Override
+    protected int getBatchSize() {
+      // Delete batch size is same as listing length
+      return getListingChunkLength(mAlluxioConf);
+    }
+
+    @Override
+    protected List<String> operate(List<String> paths) throws IOException {
+      return deleteObjects(paths);
+    }
   }
 
   /**
@@ -199,22 +472,32 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    *
    * @param path the file name
    * @return the default Alluxio user block size
-   * @throws IOException this implementation will not throw this exception, but subclasses may
    */
   @Override
   public long getBlockSizeByte(String path) throws IOException {
-    return Configuration.getBytes(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT);
+    return mAlluxioConf.getBytes(PropertyKey.USER_BLOCK_SIZE_BYTES_DEFAULT);
+  }
+
+  @Override
+  public UfsDirectoryStatus getDirectoryStatus(String path) throws IOException {
+    if (isDirectory(path)) {
+      ObjectPermissions permissions = getPermissions();
+      return new UfsDirectoryStatus(path, permissions.getOwner(), permissions.getGroup(),
+          permissions.getMode());
+    }
+    LOG.warn("Error fetching directory status, assuming directory {} does not exist", path);
+    throw new FileNotFoundException(path);
+  }
+
+  @Override
+  public  UfsDirectoryStatus getExistingDirectoryStatus(String path) throws IOException {
+    return retryOnException(() -> getDirectoryStatus(path),
+        () -> "get status of directory " + path);
   }
 
   // Not supported
   @Override
-  public Object getConf() {
-    LOG.debug("getConf is not supported when using default ObjectUnderFileSystem.");
-    return null;
-  }
-
-  // Not supported
-  @Override
+  @Nullable
   public List<String> getFileLocations(String path) throws IOException {
     LOG.debug("getFileLocations is not supported when using default ObjectUnderFileSystem.");
     return null;
@@ -222,6 +505,7 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
 
   // Not supported
   @Override
+  @Nullable
   public List<String> getFileLocations(String path, FileLocationOptions options)
       throws IOException {
     LOG.debug("getFileLocations is not supported when using default ObjectUnderFileSystem.");
@@ -235,24 +519,43 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
   }
 
   @Override
-  public long getFileSize(String path) throws IOException {
+  public UfsFileStatus getFileStatus(String path) throws IOException {
     ObjectStatus details = getObjectStatus(stripPrefixIfPresent(path));
     if (details != null) {
-      return details.getContentLength();
+      ObjectPermissions permissions = getPermissions();
+      return new UfsFileStatus(path, details.getContentHash(), details.getContentLength(),
+          details.getLastModifiedTimeMs(), permissions.getOwner(), permissions.getGroup(),
+          permissions.getMode());
     } else {
-      LOG.error("Error fetching file size, assuming file does not exist");
+      LOG.warn("Error fetching file status, assuming file {} does not exist", path);
       throw new FileNotFoundException(path);
     }
   }
 
   @Override
-  public long getModificationTimeMs(String path) throws IOException {
+  public  UfsFileStatus getExistingFileStatus(String path) throws IOException {
+    return retryOnException(() -> getFileStatus(path), () -> "get status of file " + path);
+  }
+
+  @Override
+  public UfsStatus getStatus(String path) throws IOException {
+    if (isRoot(path)) {
+      return getDirectoryStatus(path);
+    }
     ObjectStatus details = getObjectStatus(stripPrefixIfPresent(path));
     if (details != null) {
-      return details.getLastModifiedTimeMs();
-    } else {
-      throw new FileNotFoundException(path);
+      ObjectPermissions permissions = getPermissions();
+      return new UfsFileStatus(path, details.getContentHash(), details.getContentLength(),
+          details.getLastModifiedTimeMs(), permissions.getOwner(), permissions.getGroup(),
+          permissions.getMode());
     }
+    return getDirectoryStatus(path);
+  }
+
+  @Override
+  public UfsStatus getExistingStatus(String path) throws IOException {
+    return retryOnException(() -> getStatus(path),
+        () -> "get status of " + path);
   }
 
   @Override
@@ -265,7 +568,13 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
     if (getObjectStatus(keyAsFolder) != null) {
       return true;
     }
-    return getObjectListingChunkAndCreateNonEmpty(path, true) != null;
+    return getObjectListingChunkForPath(path, true) != null;
+  }
+
+  @Override
+  public boolean isExistingDirectory(String path) throws IOException {
+    return retryOnException(() -> isDirectory(path),
+        () -> "check if " + path + " is a directory");
   }
 
   @Override
@@ -275,12 +584,17 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
   }
 
   @Override
-  public UnderFileStatus[] listStatus(String path) throws IOException {
+  public boolean isObjectStorage() {
+    return true;
+  }
+
+  @Override
+  public UfsStatus[] listStatus(String path) throws IOException {
     return listInternal(path, ListOptions.defaults());
   }
 
   @Override
-  public UnderFileStatus[] listStatus(String path, ListOptions options)
+  public UfsStatus[] listStatus(String path, ListOptions options)
       throws IOException {
     return listInternal(path, options);
   }
@@ -319,12 +633,23 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
 
   @Override
   public InputStream open(String path, OpenOptions options) throws IOException {
-    return new ObjectUnderFileInputStream(this, stripPrefixIfPresent(path), options);
+    return openObject(stripPrefixIfPresent(path), options);
+  }
+
+  @Override
+  public InputStream openExistingFile(String path) throws IOException {
+    return retryOnException(() -> open(path), () -> "open file " + path);
+  }
+
+  @Override
+  public InputStream openExistingFile(String path, OpenOptions options) throws IOException {
+    return retryOnException(() -> open(path, options),
+        () -> "open file " + path + " with options " + options);
   }
 
   @Override
   public boolean renameDirectory(String src, String dst) throws IOException {
-    UnderFileStatus[] children = listInternal(src, ListOptions.defaults());
+    UfsStatus[] children = listInternal(src, ListOptions.defaults());
     if (children == null) {
       LOG.error("Failed to list directory {}, aborting rename.", src);
       return false;
@@ -340,23 +665,65 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
       return false;
     }
     // Rename each child in the src folder to destination/child
-    for (UnderFileStatus child : children) {
-      String childSrcPath = PathUtils.concatPath(src, child);
-      String childDstPath = PathUtils.concatPath(dst, child);
-      boolean success;
+    // a. Since renames are a copy operation, files are added to a buffer and processed concurrently
+    // b. Pseudo-directories are metadata only operations are not added to the buffer
+    RenameBuffer buffer = new RenameBuffer();
+    for (UfsStatus child : children) {
+      String childSrcPath = PathUtils.concatPath(src, child.getName());
+      String childDstPath = PathUtils.concatPath(dst, child.getName());
       if (child.isDirectory()) {
         // Recursive call
-        success = renameDirectory(childSrcPath, childDstPath);
+        if (!renameDirectory(childSrcPath, childDstPath)) {
+          LOG.error("Failed to rename path {} to {}, aborting rename.", childSrcPath, childDstPath);
+          return false;
+        }
       } else {
-        success = renameFile(childSrcPath, childDstPath);
+        buffer.add(new Pair<>(childSrcPath, childDstPath));
       }
-      if (!success) {
-        LOG.error("Failed to rename path {}, aborting rename.", child);
-        return false;
-      }
+    }
+    // Get result of parallel file renames
+    int filesRenamed = buffer.getResult().size();
+    if (filesRenamed != buffer.mEntriesAdded) {
+      LOG.warn("Failed to rename directory, successfully renamed {} files out of {}.",
+          filesRenamed, buffer.mEntriesAdded);
+      return false;
     }
     // Delete src and everything under src
     return deleteDirectory(src, DeleteOptions.defaults().setRecursive(true));
+  }
+
+  @Override
+  public boolean renameRenamableDirectory(String src, String dst) throws IOException {
+    return retryOnFalse(() -> renameDirectory(src, dst),
+        () -> "rename directory from " + src + " to " + dst);
+  }
+
+  /**
+   * File paths added to a {@link RenameBuffer} will be renamed concurrently.
+   */
+  @NotThreadSafe
+  protected class RenameBuffer extends OperationBuffer<Pair<String, String>> {
+    /**
+     * Construct a new {@link RenameBuffer} instance.
+     */
+    public RenameBuffer() {}
+
+    @Override
+    protected int getBatchSize() {
+      return 1;
+    }
+
+    @Override
+    protected List<Pair<String, String>> operate(List<Pair<String, String>> paths)
+        throws IOException {
+      List<Pair<String, String>> succeeded = new ArrayList<>();
+      for (Pair<String, String> pathPair : paths) {
+        if (renameFile(pathPair.getFirst(), pathPair.getSecond())) {
+          succeeded.add(pathPair);
+        }
+      }
+      return succeeded;
+    }
   }
 
   @Override
@@ -375,9 +742,11 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
         && deleteObject(stripPrefixIfPresent(src));
   }
 
-  // Default object UFS does not provide a mechanism for updating the configuration, no-op
   @Override
-  public void setConf(Object conf) {}
+  public boolean renameRenamableFile(String src, String dst) throws IOException {
+    return retryOnFalse(() -> renameFile(src, dst),
+        () -> "rename file from " + src + " to " + dst);
+  }
 
   @Override
   public boolean supportsFlush() {
@@ -385,7 +754,7 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
   }
 
   /**
-   * Create a zero-byte object used to encode a directory.
+   * Creates a zero-byte object used to encode a directory.
    *
    * @param key the key to create
    * @return true if the operation was successful
@@ -396,7 +765,6 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * Creates an {@link OutputStream} for object uploads.
    *
    * @param key ufs key including scheme and bucket
-   * @throws IOException if failed to create stream
    * @return new OutputStream
    */
   protected abstract OutputStream createObject(String key) throws IOException;
@@ -432,6 +800,32 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
   protected abstract boolean deleteObject(String key) throws IOException;
 
   /**
+   * Internal function to delete a list of keys.
+   *
+   * @param keys the list of keys to delete
+   * @return list of successfully deleted keys
+   */
+  protected List<String> deleteObjects(List<String> keys) throws IOException {
+    List<String> result = new ArrayList<>();
+    for (String key : keys) {
+      boolean status = deleteObject(key);
+      // If key is a directory, it is possible that it was not created through Alluxio and no
+      // zero-byte breadcrumb exists
+      if (status || key.endsWith(getFolderSuffix())) {
+        result.add(key);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Permissions for the mounted bucket.
+   *
+   * @return permissions
+   */
+  protected abstract ObjectPermissions getPermissions();
+
+  /**
    * Maximum number of items in a single listing chunk supported by the under store.
    *
    * @return the maximum length for a single listing query
@@ -445,9 +839,9 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    *
    * @return length of each list request
    */
-  protected int getListingChunkLength() {
-    return Configuration.getInt(PropertyKey.UNDERFS_LISTING_LENGTH) > getListingChunkLengthMax()
-        ? getListingChunkLengthMax() : Configuration.getInt(PropertyKey.UNDERFS_LISTING_LENGTH);
+  protected int getListingChunkLength(AlluxioConfiguration conf) {
+    return conf.getInt(PropertyKey.UNDERFS_LISTING_LENGTH) > getListingChunkLengthMax()
+        ? getListingChunkLengthMax() : conf.getInt(PropertyKey.UNDERFS_LISTING_LENGTH);
   }
 
   /**
@@ -457,7 +851,8 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * @param key ufs key to get metadata for
    * @return {@link ObjectStatus} if key exists and successful, otherwise null
    */
-  protected abstract ObjectStatus getObjectStatus(String key);
+  @Nullable
+  protected abstract ObjectStatus getObjectStatus(String key) throws IOException;
 
   /**
    * Get parent path.
@@ -465,6 +860,7 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * @param path ufs path including scheme and bucket
    * @return the parent path, or null if the parent does not exist
    */
+  @Nullable
   protected String getParentPath(String path) {
     // Root does not have a parent.
     if (isRoot(path)) {
@@ -494,7 +890,6 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * @param child the key of the child
    * @param parent the key of the parent
    * @return the child key with the parent prefix removed
-   * @throws IOException if parent prefix is invalid
    */
   protected String getChildName(String child, String parent) throws IOException {
     if (child.startsWith(parent)) {
@@ -516,29 +911,31 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * @param key pseudo-directory key excluding header and bucket
    * @param recursive whether to request immediate children only, or all descendants
    * @return chunked object listing, or null if key is not found
-   * @throws IOException if a non-Alluxio error occurs
    */
+  @Nullable
   protected abstract ObjectListingChunk getObjectListingChunk(String key, boolean recursive)
       throws IOException;
 
   /**
-   * Gets a (partial) object listing and attempt to create non-empty directory breadcrumb.
+   * Gets a (partial) object listing for the given path.
    *
    * @param path of pseudo-directory
    * @param recursive whether to request immediate children only, or all descendants
    * @return chunked object listing, or null if the path does not exist as a pseudo-directory
-   * @throws IOException when a non-Alluxio error occurs
    */
-  protected ObjectListingChunk getObjectListingChunkAndCreateNonEmpty(String path,
-      boolean recursive) throws IOException {
+  @Nullable
+  protected ObjectListingChunk getObjectListingChunkForPath(String path, boolean recursive)
+      throws IOException {
     // Check if anything begins with <folder_path>/
     String dir = stripPrefixIfPresent(path);
     ObjectListingChunk objs = getObjectListingChunk(dir, recursive);
     // If there are, this is a folder and we can create the necessary metadata
-    if (objs != null && ((objs.getObjectNames() != null && objs.getObjectNames().length > 0)
+    if (objs != null && ((objs.getObjectStatuses() != null && objs.getObjectStatuses().length > 0)
         || (objs.getCommonPrefixes() != null && objs.getCommonPrefixes().length > 0))) {
       // If the breadcrumb exists, this is a no-op
-      mkdirsInternal(dir);
+      if (!mUfsConf.isReadOnly()) {
+        mkdirsInternal(dir);
+      }
       return objs;
     }
     return null;
@@ -558,21 +955,21 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * @param path the key to list
    * @param options for listing
    * @return an array of the file and folder names in this directory
-   * @throws IOException if an I/O error occurs
    */
-  protected UnderFileStatus[] listInternal(String path, ListOptions options) throws IOException {
-    ObjectListingChunk chunk = getObjectListingChunkAndCreateNonEmpty(path, options.isRecursive());
+  @Nullable
+  protected UfsStatus[] listInternal(String path, ListOptions options) throws IOException {
+    ObjectListingChunk chunk = getObjectListingChunkForPath(path, options.isRecursive());
     if (chunk == null) {
       String keyAsFolder = convertToFolderName(stripPrefixIfPresent(path));
       if (getObjectStatus(keyAsFolder) != null) {
         // Path is an empty directory
-        return new UnderFileStatus[0];
+        return new UfsStatus[0];
       }
       return null;
     }
     String keyPrefix = PathUtils.normalizePath(stripPrefixIfPresent(path), PATH_SEPARATOR);
     keyPrefix = keyPrefix.equals(PATH_SEPARATOR) ? "" : keyPrefix;
-    Map<String, Boolean> children = new HashMap<>();
+    Map<String, UfsStatus> children = new HashMap<>();
     while (chunk != null) {
       // Directories in UFS can be possibly encoded in two different ways:
       // (1) as file objects with FOLDER_SUFFIX for directories created through Alluxio or
@@ -590,15 +987,25 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
       // - commonPrefix = ufs/dir2/, child = dir2
 
       // Handle case (1)
-      for (String obj : chunk.getObjectNames()) {
+      for (ObjectStatus status : chunk.getObjectStatuses()) {
         // Remove parent portion of the key
-        String child = getChildName(obj, keyPrefix);
-        // Prune the special folder suffix
-        boolean isDir = child.endsWith(getFolderSuffix());
-        child = CommonUtils.stripSuffixIfPresent(child, getFolderSuffix());
-        // Only add if the path is not empty (removes results equal to the path)
-        if (!child.isEmpty()) {
-          children.put(child, isDir);
+        String child = getChildName(status.getName(), keyPrefix);
+        if (child.isEmpty() || child.equals(getFolderSuffix())) {
+          // Removes results equal to the path
+          continue;
+        }
+        ObjectPermissions permissions = getPermissions();
+        if (child.endsWith(getFolderSuffix())) {
+          // Child is a directory
+          child = CommonUtils.stripSuffixIfPresent(child, getFolderSuffix());
+          children.put(child, new UfsDirectoryStatus(child, permissions.getOwner(),
+              permissions.getGroup(), permissions.getMode()));
+        } else {
+          // Child is a file
+          children.put(child,
+              new UfsFileStatus(child, status.getContentHash(), status.getContentLength(),
+                  status.getLastModifiedTimeMs(), permissions.getOwner(), permissions.getGroup(),
+                  permissions.getMode()));
         }
       }
       // Handle case (2)
@@ -607,11 +1014,14 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
         // In case of a recursive listing infer pseudo-directories as the commonPrefixes returned
         // from the object store is empty for an empty delimiter.
         HashSet<String> prefixes = new HashSet<>();
-        for (String objectName : chunk.getObjectNames()) {
-          while (objectName.startsWith(keyPrefix)) {
+        for (ObjectStatus objectStatus : chunk.getObjectStatuses()) {
+          String objectName = objectStatus.getName();
+          while (objectName.startsWith(keyPrefix) && objectName.contains(PATH_SEPARATOR)) {
             objectName = objectName.substring(0, objectName.lastIndexOf(PATH_SEPARATOR));
             if (!objectName.isEmpty()) {
-              prefixes.add(objectName);
+              // include the separator with the prefix, to conform to what object stores return
+              // as common prefixes.
+              prefixes.add(PathUtils.normalizePath(objectName, PATH_SEPARATOR));
             }
           }
         }
@@ -628,19 +1038,23 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
           child = childNameIndex != -1 ? child.substring(0, childNameIndex) : child;
           if (!child.isEmpty() && !children.containsKey(child)) {
             // This directory has not been created through Alluxio.
-            mkdirsInternal(commonPrefix);
+            if (!mUfsConf.isReadOnly()) {
+              mkdirsInternal(commonPrefix);
+            }
             // If both a file and a directory existed with the same name, the path will be
             // treated as a directory
-            children.put(child, true);
+            ObjectPermissions permissions = getPermissions();
+            children.put(child, new UfsDirectoryStatus(child, permissions.getOwner(),
+                permissions.getGroup(), permissions.getMode()));
           }
         }
       }
       chunk = chunk.getNextChunk();
     }
-    UnderFileStatus[] ret = new UnderFileStatus[children.size()];
+    UfsStatus[] ret = new UfsStatus[children.size()];
     int pos = 0;
-    for (Map.Entry<String, Boolean> entry : children.entrySet()) {
-      ret[pos++] = new UnderFileStatus(entry.getKey(), entry.getValue());
+    for (UfsStatus status : children.values()) {
+      ret[pos++] = status;
     }
     return ret;
   }
@@ -660,7 +1074,6 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    *
    * @param key the key to open
    * @return an {@link InputStream} to read from key
-   * @throws IOException if a non-Alluxio error occurs
    */
   protected abstract InputStream openObject(String key, OpenOptions options) throws IOException;
 
@@ -688,12 +1101,80 @@ public abstract class ObjectUnderFileSystem extends BaseUnderFileSystem {
    * @param path the path to strip
    * @return the path without the bucket prefix
    */
-  private String stripPrefixIfPresent(String path) {
+  protected String stripPrefixIfPresent(String path) {
     String stripedKey = CommonUtils.stripPrefixIfPresent(path,
         PathUtils.normalizePath(getRootKey(), PATH_SEPARATOR));
     if (!stripedKey.equals(path)) {
       return stripedKey;
     }
     return CommonUtils.stripPrefixIfPresent(path, PATH_SEPARATOR);
+  }
+
+  /**
+   * Represents an object store operation.
+   */
+  private interface ObjectStoreOperation<T> {
+    /**
+     * Applies this operation.
+     *
+     * @return the result of this operation
+     */
+    T apply() throws IOException;
+  }
+
+  /**
+   * Retries the given object store operation when it throws exceptions
+   * to resolve eventual consistency issue.
+   *
+   * @param op the object store operation to retry
+   * @param description the description regarding the operation
+   * @return the operation result if operation succeed
+   */
+  private <T> T retryOnException(ObjectStoreOperation<T> op,
+      Supplier<String> description) throws IOException {
+    RetryPolicy retryPolicy = getRetryPolicy();
+    IOException thrownException = null;
+    while (retryPolicy.attempt()) {
+      try {
+        return op.apply();
+      } catch (IOException e) {
+        LOG.debug("Attempt {} to {} failed with exception : {}", retryPolicy.getAttemptCount(),
+            description.get(), e.toString());
+        thrownException = e;
+      }
+    }
+    throw thrownException;
+  }
+
+  /**
+   * Retries the given object store operation when it returns false
+   * to resolve eventual consistency issue.
+   *
+   * @param op the object store operation to retry
+   * @param description the description regarding the operation
+   * @return the operation result if operation returned true
+   */
+  private boolean retryOnFalse(ObjectStoreOperation<Boolean> op,
+      Supplier<String> description) throws IOException {
+    RetryPolicy retryPolicy = getRetryPolicy();
+    while (retryPolicy.attempt()) {
+      if (op.apply()) {
+        return true;
+      } else {
+        LOG.debug("Failed in attempt {} to {} ", retryPolicy.getAttemptCount(),
+            description.get());
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @return the retry policy to use
+   */
+  private RetryPolicy getRetryPolicy() {
+    return new ExponentialBackoffRetry(
+        (int) mUfsConf.getMs(PropertyKey.UNDERFS_EVENTUAL_CONSISTENCY_RETRY_BASE_SLEEP_MS),
+        (int) mUfsConf.getMs(PropertyKey.UNDERFS_EVENTUAL_CONSISTENCY_RETRY_MAX_SLEEP_MS),
+        mUfsConf.getInt(PropertyKey.UNDERFS_EVENTUAL_CONSISTENCY_RETRY_MAX_NUM));
   }
 }

@@ -11,11 +11,20 @@
 
 package alluxio.master;
 
+import alluxio.ConfigurationTestUtils;
 import alluxio.client.file.FileSystem;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.master.journal.JournalType;
 import alluxio.wire.WorkerNetAddress;
-import alluxio.worker.AlluxioWorkerService;
+import alluxio.worker.WorkerProcess;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.Map;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -27,7 +36,7 @@ import javax.annotation.concurrent.NotThreadSafe;
  * // Create a cluster instance
  * localAlluxioCluster = new LocalAlluxioCluster(WORKER_CAPACITY_BYTES, BLOCK_SIZE_BYTES);
  * // If you have special conf parameter to set for integration tests:
- * Configuration testConf = localAlluxioCluster.newTestConf();
+ * AlluxioConfiguration testConf = localAlluxioCluster.newTestConf();
  * testConf.set(Constants.USER_FILE_BUFFER_BYTES, String.valueOf(BUFFER_BYTES));
  * // After setting up the test conf, start this local cluster:
  * localAlluxioCluster.start(testConf);
@@ -35,13 +44,15 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe
 public final class LocalAlluxioCluster extends AbstractLocalAlluxioCluster {
+  private static final Logger LOG = LoggerFactory.getLogger(LocalAlluxioCluster.class);
+
   private LocalAlluxioMaster mMaster;
 
   /**
    * Runs a test Alluxio cluster with a single Alluxio worker.
    */
   public LocalAlluxioCluster() {
-    super(1);
+    this(1);
   }
 
   /**
@@ -57,7 +68,12 @@ public final class LocalAlluxioCluster extends AbstractLocalAlluxioCluster {
   }
 
   @Override
-  public LocalAlluxioMaster getMaster() {
+  public FileSystem getClient(FileSystemContext context) throws IOException {
+    return mMaster.getClient(context);
+  }
+
+  @Override
+  public LocalAlluxioMaster getLocalAlluxioMaster() {
     return mMaster;
   }
 
@@ -92,7 +108,7 @@ public final class LocalAlluxioCluster extends AbstractLocalAlluxioCluster {
   /**
    * @return the first worker
    */
-  public AlluxioWorkerService getWorker() {
+  public WorkerProcess getWorkerProcess() {
     return mWorkers.get(0);
   }
 
@@ -100,28 +116,29 @@ public final class LocalAlluxioCluster extends AbstractLocalAlluxioCluster {
    * @return the address of the first worker
    */
   public WorkerNetAddress getWorkerAddress() {
-    return getWorker().getAddress();
+    return getWorkerProcess().getAddress();
   }
 
   @Override
-  protected void startMaster() throws Exception {
-    mMaster = LocalAlluxioMaster.create(mWorkDirectory);
+  public void initConfiguration() throws IOException {
+    setAlluxioWorkDirectory();
+    setHostname();
+    for (Map.Entry<PropertyKey, String> entry : ConfigurationTestUtils
+        .testConfigurationDefaults(ServerConfiguration.global(), mHostname, mWorkDirectory)
+        .entrySet()) {
+      ServerConfiguration.set(entry.getKey(), entry.getValue());
+    }
+    ServerConfiguration.set(PropertyKey.TEST_MODE, true);
+    ServerConfiguration.set(PropertyKey.MASTER_JOURNAL_TYPE, JournalType.UFS);
+    ServerConfiguration.set(PropertyKey.PROXY_WEB_PORT, 0);
+    ServerConfiguration.set(PropertyKey.WORKER_RPC_PORT, 0);
+    ServerConfiguration.set(PropertyKey.WORKER_WEB_PORT, 0);
+  }
+
+  @Override
+  public void startMasters() throws Exception {
+    mMaster = LocalAlluxioMaster.create(mWorkDirectory, true);
     mMaster.start();
-  }
-
-  @Override
-  protected void startWorkers() throws Exception {
-    // We need to update the worker context with the most recent configuration so they know the
-    // correct port to connect to master.
-    runWorkers();
-  }
-
-  @Override
-  public void stopFS() throws Exception {
-    LOG.info("stop Alluxio filesystem");
-    // Stopping Workers before stopping master speeds up tests
-    stopWorkers();
-    mMaster.stop();
   }
 
   @Override
@@ -132,9 +149,7 @@ public final class LocalAlluxioCluster extends AbstractLocalAlluxioCluster {
   }
 
   @Override
-  public void stopWorkers() throws Exception {
-    for (AlluxioWorkerService worker : mWorkers) {
-      worker.stop();
-    }
+  public void stopMasters() throws Exception {
+    mMaster.stop();
   }
 }

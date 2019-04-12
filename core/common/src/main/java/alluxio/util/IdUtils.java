@@ -11,7 +11,8 @@
 
 package alluxio.util;
 
-import alluxio.Constants;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.master.block.BlockId;
 
 import org.slf4j.Logger;
@@ -27,12 +28,15 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class IdUtils {
-  private IdUtils() {} // prevent instantiation
+  private static final Logger LOG = LoggerFactory.getLogger(IdUtils.class);
 
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
   public static final long INVALID_FILE_ID = -1;
   public static final long INVALID_WORKER_ID = -1;
+  public static final long INVALID_MOUNT_ID = -1;
+  public static final long ROOT_MOUNT_ID = 1;
   private static SecureRandom sRandom = new SecureRandom();
+
+  private IdUtils() {} // prevent instantiation
 
   /**
    * Creates an id for a file based on the given id of the container.
@@ -74,5 +78,39 @@ public final class IdUtils {
    */
   public static synchronized long getRandomNonNegativeLong() {
     return Math.abs(sRandom.nextLong());
+  }
+
+  /**
+   * @return a session ID
+   */
+  public static long createSessionId() {
+    return getRandomNonNegativeLong();
+  }
+
+  /**
+   * @return a random long which is guaranteed to be non negative (zero is allowed)
+   */
+  public static long createMountId() {
+    return getRandomNonNegativeLong();
+  }
+
+  /**
+   * @return app suffixed by a positive random long
+   */
+  public static String createFileSystemContextId() {
+    return "app-" + Math.abs(sRandom.nextLong());
+  }
+
+  /**
+   *
+   * @param conf an alluxio configuration with the USER_APP_ID property key
+   * @return a string representing the USER_APP_ID
+   */
+  public static String createOrGetAppIdFromConfig(AlluxioConfiguration conf) {
+    if (conf.isSet(PropertyKey.USER_APP_ID)) {
+      return conf.get(PropertyKey.USER_APP_ID);
+    } else {
+      return IdUtils.createFileSystemContextId();
+    }
   }
 }

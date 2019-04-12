@@ -11,7 +11,8 @@
 
 package alluxio.worker.block.meta;
 
-import alluxio.Constants;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
 import alluxio.exception.BlockAlreadyExistsException;
 import alluxio.exception.BlockDoesNotExistException;
 import alluxio.exception.ExceptionMessage;
@@ -25,6 +26,7 @@ import com.google.common.collect.Sets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.concurrent.NotThreadSafe;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -35,15 +37,14 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
-import javax.annotation.concurrent.NotThreadSafe;
-
 /**
  * Represents a directory in a storage tier. It has a fixed capacity allocated to it on
  * instantiation. It contains the set of blocks currently in the storage directory.
  */
 @NotThreadSafe
 public final class StorageDir {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(StorageDir.class);
+
   private final long mCapacityBytes;
   /** A map from block id to block metadata. */
   private Map<Long, BlockMeta> mBlockIdToBlockMap;
@@ -58,7 +59,7 @@ public final class StorageDir {
   private StorageTier mTier;
 
   private StorageDir(StorageTier tier, int dirIndex, long capacityBytes, String dirPath) {
-    mTier = Preconditions.checkNotNull(tier);
+    mTier = Preconditions.checkNotNull(tier, "tier");
     mDirIndex = dirIndex;
     mCapacityBytes = capacityBytes;
     mAvailableBytes = new AtomicLong(capacityBytes);
@@ -83,7 +84,6 @@ public final class StorageDir {
    * @param dirPath filesystem path of this dir for actual storage
    * @return the new created {@link StorageDir}
    * @throws BlockAlreadyExistsException when metadata of existing committed blocks already exists
-   * @throws IOException if the storage directory cannot be created with the appropriate permissions
    * @throws WorkerOutOfSpaceException when metadata can not be added due to limited left space
    */
   public static StorageDir newStorageDir(StorageTier tier, int dirIndex, long capacityBytes,
@@ -101,13 +101,17 @@ public final class StorageDir {
    * {dir}/{blockId}. other paths will be deleted.
    *
    * @throws BlockAlreadyExistsException when metadata of existing committed blocks already exists
-   * @throws IOException if the storage directory cannot be created with the appropriate permissions
    * @throws WorkerOutOfSpaceException when metadata can not be added due to limited left space
    */
   private void initializeMeta() throws BlockAlreadyExistsException, IOException,
       WorkerOutOfSpaceException {
     // Create the storage directory path
-    FileUtils.createStorageDirPath(mDirPath);
+    boolean isDirectoryNewlyCreated = FileUtils.createStorageDirPath(mDirPath,
+        ServerConfiguration.get(PropertyKey.WORKER_DATA_FOLDER_PERMISSIONS));
+
+    if (isDirectoryNewlyCreated) {
+      LOG.info("Folder {} was created!", mDirPath);
+    }
 
     File dir = new File(mDirPath);
     File[] paths = dir.listFiles();
@@ -253,14 +257,9 @@ public final class StorageDir {
    *
    * @param blockId the block id
    * @return {@link TempBlockMeta} of the given block or null
-   * @throws BlockDoesNotExistException if no temp block is found
    */
-  public TempBlockMeta getTempBlockMeta(long blockId) throws BlockDoesNotExistException {
-    TempBlockMeta tempBlockMeta = mBlockIdToTempBlockMap.get(blockId);
-    if (tempBlockMeta == null) {
-      throw new BlockDoesNotExistException(ExceptionMessage.TEMP_BLOCK_META_NOT_FOUND, blockId);
-    }
-    return tempBlockMeta;
+  public TempBlockMeta getTempBlockMeta(long blockId) {
+    return mBlockIdToTempBlockMap.get(blockId);
   }
 
   /**
@@ -272,7 +271,7 @@ public final class StorageDir {
    */
   public void addBlockMeta(BlockMeta blockMeta) throws WorkerOutOfSpaceException,
       BlockAlreadyExistsException {
-    Preconditions.checkNotNull(blockMeta);
+    Preconditions.checkNotNull(blockMeta, "blockMeta");
     long blockId = blockMeta.getBlockId();
     long blockSize = blockMeta.getBlockSize();
 
@@ -297,7 +296,7 @@ public final class StorageDir {
    */
   public void addTempBlockMeta(TempBlockMeta tempBlockMeta) throws WorkerOutOfSpaceException,
       BlockAlreadyExistsException {
-    Preconditions.checkNotNull(tempBlockMeta);
+    Preconditions.checkNotNull(tempBlockMeta, "tempBlockMeta");
     long sessionId = tempBlockMeta.getSessionId();
     long blockId = tempBlockMeta.getBlockId();
     long blockSize = tempBlockMeta.getBlockSize();
@@ -328,7 +327,7 @@ public final class StorageDir {
    * @throws BlockDoesNotExistException if no block is found
    */
   public void removeBlockMeta(BlockMeta blockMeta) throws BlockDoesNotExistException {
-    Preconditions.checkNotNull(blockMeta);
+    Preconditions.checkNotNull(blockMeta, "blockMeta");
     long blockId = blockMeta.getBlockId();
     BlockMeta deletedBlockMeta = mBlockIdToBlockMap.remove(blockId);
     if (deletedBlockMeta == null) {
@@ -344,7 +343,7 @@ public final class StorageDir {
    * @throws BlockDoesNotExistException if no temp block is found
    */
   public void removeTempBlockMeta(TempBlockMeta tempBlockMeta) throws BlockDoesNotExistException {
-    Preconditions.checkNotNull(tempBlockMeta);
+    Preconditions.checkNotNull(tempBlockMeta, "tempBlockMeta");
     final long blockId = tempBlockMeta.getBlockId();
     final long sessionId = tempBlockMeta.getSessionId();
     TempBlockMeta deletedTempBlockMeta = mBlockIdToTempBlockMap.remove(blockId);

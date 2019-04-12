@@ -11,14 +11,13 @@
 
 package alluxio.worker.file;
 
-import alluxio.Configuration;
-import alluxio.Constants;
-import alluxio.PropertyKey;
-import alluxio.exception.AlluxioException;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.grpc.CommandType;
+import alluxio.grpc.FileSystemCommand;
+import alluxio.grpc.FileSystemHeartbeatPOptions;
+import alluxio.grpc.PersistFile;
 import alluxio.heartbeat.HeartbeatExecutor;
-import alluxio.thrift.CommandType;
-import alluxio.thrift.FileSystemCommand;
-import alluxio.thrift.PersistFile;
 import alluxio.util.ThreadFactoryUtils;
 import alluxio.worker.block.BlockMasterSync;
 
@@ -48,7 +47,7 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe // TODO(jiri): make thread-safe (c.f. ALLUXIO-1624)
 final class FileWorkerMasterSyncExecutor implements HeartbeatExecutor {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(FileWorkerMasterSyncExecutor.class);
 
   /** Logic for managing async file persistence. */
   private final FileDataManager mFileDataManager;
@@ -72,27 +71,29 @@ final class FileWorkerMasterSyncExecutor implements HeartbeatExecutor {
     mMasterClient = Preconditions.checkNotNull(masterClient, "masterClient");
     mWorkerId = Preconditions.checkNotNull(workerId, "workerId");
     mPersistFileService = Executors.newFixedThreadPool(
-        Configuration.getInt(PropertyKey.WORKER_FILE_PERSIST_POOL_SIZE),
+        ServerConfiguration.getInt(PropertyKey.WORKER_FILE_PERSIST_POOL_SIZE),
         ThreadFactoryUtils.build("persist-file-service-%d", true));
   }
 
   @Override
   public void heartbeat() {
-    List<Long> persistedFiles = mFileDataManager.getPersistedFiles();
-    if (!persistedFiles.isEmpty()) {
-      LOG.info("files {} persisted", persistedFiles);
+    FileDataManager.PersistedFilesInfo persistedFiles = mFileDataManager.getPersistedFileInfos();
+    if (!persistedFiles.idList().isEmpty()) {
+      LOG.info("files {} persisted", persistedFiles.idList());
     }
 
     FileSystemCommand command;
     try {
-      command = mMasterClient.heartbeat(mWorkerId.get(), persistedFiles);
-    } catch (IOException | AlluxioException e) {
+      FileSystemHeartbeatPOptions options = FileSystemHeartbeatPOptions.newBuilder()
+          .addAllPersistedFileFingerprints(persistedFiles.ufsFingerprintList()).build();
+      command = mMasterClient.heartbeat(mWorkerId.get(), persistedFiles.idList(), options);
+    } catch (Exception e) {
       LOG.error("Failed to heartbeat to master", e);
       return;
     }
 
     // removes the persisted files that are confirmed
-    mFileDataManager.clearPersistedFiles(persistedFiles);
+    mFileDataManager.clearPersistedFiles(persistedFiles.idList());
 
     if (command == null) {
       LOG.error("The command sent from master is null");
@@ -104,10 +105,10 @@ final class FileWorkerMasterSyncExecutor implements HeartbeatExecutor {
     }
 
     for (PersistFile persistFile : command.getCommandOptions().getPersistOptions()
-            .getPersistFiles()) {
+            .getPersistFilesList()) {
       // Enqueue the persist request.
-      mPersistFileService.execute(
-          new FilePersister(mFileDataManager, persistFile.getFileId(), persistFile.getBlockIds()));
+      mPersistFileService.execute(new FilePersister(mFileDataManager, persistFile.getFileId(),
+          persistFile.getBlockIdsList()));
     }
   }
 
@@ -120,9 +121,9 @@ final class FileWorkerMasterSyncExecutor implements HeartbeatExecutor {
    * Thread to persist a file into under file system.
    */
   class FilePersister implements Runnable {
-    private FileDataManager mFileDataManager;
-    private long mFileId;
-    private List<Long> mBlockIds;
+    private final FileDataManager mFileDataManager;
+    private final long mFileId;
+    private final List<Long> mBlockIds;
 
     /**
      * Creates a new instance of {@link FilePersister}.
@@ -149,7 +150,7 @@ final class FileWorkerMasterSyncExecutor implements HeartbeatExecutor {
         LOG.info("persist file {} of blocks {}", mFileId, mBlockIds);
         try {
           mFileDataManager.persistFile(mFileId, mBlockIds);
-        } catch (AlluxioException | IOException e) {
+        } catch (Exception e) {
           LOG.error("Failed to persist file {}", mFileId, e);
         }
       }

@@ -11,30 +11,50 @@
 
 package alluxio;
 
+import static org.junit.Assert.assertEquals;
+
+import alluxio.conf.InstancedConfiguration;
 import alluxio.security.authentication.AuthenticatedClientUser;
 
-import org.junit.Assert;
+import org.junit.After;
 import org.junit.Test;
 import org.junit.runners.model.Statement;
 
 /**
- * Unit tests for {@link ConfigurationRule}.
+ * Unit tests for {@link AuthenticatedUserRule}.
  */
 public final class AuthenticatedUserRuleTest {
+  private static final String TESTCASE_USER = "testcase-user";
+  private static final String RULE_USER = "rule-user";
+  private static final String OUTSIDE_RULE_USER = "outside-rule-user";
+
+  private InstancedConfiguration mConfiguration = ConfigurationTestUtils.defaults();
+
+  private final Statement mStatement = new Statement() {
+    @Override
+    public void evaluate() throws Throwable {
+      assertEquals(RULE_USER, AuthenticatedClientUser.get(mConfiguration).getName());
+      AuthenticatedClientUser.set(TESTCASE_USER);
+      assertEquals(TESTCASE_USER, AuthenticatedClientUser.get(mConfiguration).getName());
+    }
+  };
+
+  @After
+  public void after() throws Exception {
+    AuthenticatedClientUser.remove();
+  }
 
   @Test
-  public void changeConfiguration() throws Throwable {
-    Statement statement = new Statement() {
-      @Override
-      public void evaluate() throws Throwable {
-        Assert.assertEquals("testuser", AuthenticatedClientUser.get().getName());
-        Assert.assertTrue(Configuration.containsKey(PropertyKey.SECURITY_LOGIN_USERNAME));
-      }
-    };
-    Assert.assertNull(AuthenticatedClientUser.get());
-    Assert.assertFalse(Configuration.containsKey(PropertyKey.SECURITY_LOGIN_USERNAME));
-    new AuthenticatedUserRule("testuser").apply(statement, null).evaluate();
-    Assert.assertNull(AuthenticatedClientUser.get());
-    Assert.assertFalse(Configuration.containsKey(PropertyKey.SECURITY_LOGIN_USERNAME));
+  public void userSetBeforeRule() throws Throwable {
+    AuthenticatedClientUser.set(OUTSIDE_RULE_USER);
+    new AuthenticatedUserRule(RULE_USER, mConfiguration).apply(mStatement, null).evaluate();
+    assertEquals(OUTSIDE_RULE_USER, AuthenticatedClientUser.get(mConfiguration).getName());
+  }
+
+  @Test
+  public void noUserBeforeRule() throws Throwable {
+    AuthenticatedClientUser.remove();
+    new AuthenticatedUserRule(RULE_USER, mConfiguration).apply(mStatement, null).evaluate();
+    assertEquals(null, AuthenticatedClientUser.get(mConfiguration));
   }
 }

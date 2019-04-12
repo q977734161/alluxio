@@ -12,14 +12,15 @@
 package alluxio.wire;
 
 import alluxio.util.CommonUtils;
+import alluxio.grpc.GrpcUtils;
 
-import org.codehaus.jackson.map.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Assert;
 import org.junit.Test;
 
 import java.util.Random;
 
-public class BlockLocationTest {
+public final class BlockLocationTest {
 
   @Test
   public void json() throws Exception {
@@ -31,9 +32,9 @@ public class BlockLocationTest {
   }
 
   @Test
-  public void thrift() {
+  public void proto() {
     BlockLocation blockLocation = createRandom();
-    BlockLocation other = ThriftUtils.fromThrift(ThriftUtils.toThrift(blockLocation));
+    BlockLocation other = GrpcUtils.fromProto(GrpcUtils.toProto(blockLocation));
     checkEquality(blockLocation, other);
   }
 
@@ -42,7 +43,6 @@ public class BlockLocationTest {
     Assert.assertEquals(a.getWorkerAddress(), b.getWorkerAddress());
     Assert.assertEquals(a.getTierAlias(), b.getTierAlias());
     Assert.assertEquals(a, b);
-
   }
 
   public static BlockLocation createRandom() {

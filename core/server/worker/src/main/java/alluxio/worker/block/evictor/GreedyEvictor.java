@@ -11,7 +11,6 @@
 
 package alluxio.worker.block.evictor;
 
-import alluxio.Constants;
 import alluxio.collections.Pair;
 import alluxio.worker.block.BlockMetadataManagerView;
 import alluxio.worker.block.BlockStoreLocation;
@@ -38,7 +37,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class GreedyEvictor implements Evictor {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(GreedyEvictor.class);
 
   /**
    * Creates a new instance of {@link GreedyEvictor}.
@@ -51,8 +50,14 @@ public final class GreedyEvictor implements Evictor {
   @Override
   public EvictionPlan freeSpaceWithView(long availableBytes, BlockStoreLocation location,
       BlockMetadataManagerView view) {
-    Preconditions.checkNotNull(location);
-    Preconditions.checkNotNull(view);
+    return freeSpaceWithView(availableBytes, location, view, Mode.GUARANTEED);
+  }
+
+  @Override
+  public EvictionPlan freeSpaceWithView(long availableBytes, BlockStoreLocation location,
+      BlockMetadataManagerView view, Mode mode) {
+    Preconditions.checkNotNull(location, "location");
+    Preconditions.checkNotNull(view, "view");
 
     // 1. Select a StorageDirView that has enough capacity for required bytes.
     StorageDirView selectedDirView = null;
@@ -72,7 +77,7 @@ public final class GreedyEvictor implements Evictor {
       }
     }
     if (selectedDirView == null) {
-      LOG.error("Failed to freeSpace: No StorageDirView has enough capacity of {} bytes",
+      LOG.warn("Failed to freeSpace: No StorageDirView has enough capacity of {} bytes",
           availableBytes);
       return null;
     }

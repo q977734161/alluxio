@@ -11,9 +11,8 @@
 
 package alluxio.security.group;
 
-import alluxio.Configuration;
-import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.annotation.PublicApi;
 import alluxio.util.CommonUtils;
 
@@ -36,7 +35,7 @@ public interface GroupMappingService {
    * Factory for creating a new instance.
    */
   class Factory {
-    private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+    private static final Logger LOG = LoggerFactory.getLogger(GroupMappingService.Factory.class);
 
     // TODO(chaomin): maintain a map from SECURITY_GROUP_MAPPING_CLASS name to cachedGroupMapping.
     // Currently the single global cached GroupMappingService assumes that there is no dynamic
@@ -44,32 +43,29 @@ public interface GroupMappingService {
     private static CachedGroupMapping sCachedGroupMapping = null;
 
     // prevent instantiation
-    private Factory() {}
+    private Factory() {
+    }
 
     /**
      * Gets the cached groups mapping service being used to map user-to-groups.
      *
      * @return the groups mapping service being used to map user-to-groups
      */
-    public static GroupMappingService get() {
+    public static GroupMappingService get(AlluxioConfiguration conf) {
       if (sCachedGroupMapping == null) {
         synchronized (Factory.class) {
           if (sCachedGroupMapping == null) {
-            try {
-              LOG.debug("Creating new Groups object");
-              GroupMappingService groupMappingService = CommonUtils.createNewClassInstance(
-                  Configuration.<GroupMappingService>getClass(
-                      PropertyKey.SECURITY_GROUP_MAPPING_CLASS), null, null);
-              sCachedGroupMapping = new CachedGroupMapping(groupMappingService);
-            } catch (Exception e) {
-              throw new RuntimeException(e);
-            }
+            LOG.debug("Creating new Groups object");
+            GroupMappingService groupMappingService =
+                CommonUtils.createNewClassInstance(conf.<GroupMappingService>getClass(
+                    PropertyKey.SECURITY_GROUP_MAPPING_CLASS), null, null);
+            sCachedGroupMapping = new CachedGroupMapping(groupMappingService,
+                conf.getMs(PropertyKey.SECURITY_GROUP_MAPPING_CACHE_TIMEOUT_MS));
           }
         }
       }
       return sCachedGroupMapping;
     }
-
   }
 
   /**
@@ -78,7 +74,6 @@ public interface GroupMappingService {
    *
    * @param user user's name
    * @return group memberships of user
-   * @throws IOException if can't get user's groups
    */
   List<String> getGroups(String user) throws IOException;
 }

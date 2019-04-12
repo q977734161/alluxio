@@ -12,7 +12,6 @@
 package alluxio.util.io;
 
 import alluxio.AlluxioURI;
-import alluxio.Constants;
 import alluxio.exception.InvalidPathException;
 
 import org.slf4j.Logger;
@@ -27,6 +26,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.PosixFileAttributeView;
@@ -43,19 +43,16 @@ import javax.annotation.concurrent.ThreadSafe;
  * Provides utility methods for working with files and directories.
  *
  * By convention, methods take file path strings as parameters.
- *
- * TODO(peis): Move everything to nio.
  */
 @ThreadSafe
 public final class FileUtils {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(FileUtils.class);
 
   /**
    * Changes the local file's group.
    *
    * @param path that will change owner
    * @param group the new group
-   * @throws IOException if the group is unable to be changed
    */
   public static void changeLocalFileGroup(String path, String group) throws IOException {
     UserPrincipalLookupService lookupService =
@@ -72,7 +69,6 @@ public final class FileUtils {
    *
    * @param filePath that will change permission
    * @param perms the permission, e.g. "rwxr--r--"
-   * @throws IOException when fails to change permission
    */
   public static void changeLocalFilePermission(String filePath, String perms) throws IOException {
     Files.setPosixFilePermissions(Paths.get(filePath), PosixFilePermissions.fromString(perms));
@@ -82,7 +78,6 @@ public final class FileUtils {
    * Changes local file's permission to be "rwxrwxrwx".
    *
    * @param filePath that will change permission
-   * @throws IOException when fails to change file's permission to "rwxrwxrwx"
    */
   public static void changeLocalFileToFullPermission(String filePath) throws IOException {
     changeLocalFilePermission(filePath, "rwxrwxrwx");
@@ -93,7 +88,6 @@ public final class FileUtils {
    *
    * @param filePath the file path
    * @return the owner of the local file
-   * @throws IOException when fails to get the owner
    */
   public static String getLocalFileOwner(String filePath) throws IOException {
     PosixFileAttributes attr =
@@ -106,7 +100,6 @@ public final class FileUtils {
    *
    * @param filePath the file path
    * @return the group of the local file
-   * @throws IOException when fails to get the group
    */
   public static String getLocalFileGroup(String filePath) throws IOException {
     PosixFileAttributes attr =
@@ -119,12 +112,20 @@ public final class FileUtils {
    *
    * @param filePath the file path
    * @return the file mode in short, e.g. 0777
-   * @throws IOException when fails to get the permission
    */
   public static short getLocalFileMode(String filePath) throws IOException {
     Set<PosixFilePermission> permission =
         Files.readAttributes(Paths.get(filePath), PosixFileAttributes.class).permissions();
-    // Translate posix file permissions to short mode.
+    return translatePosixPermissionToMode(permission);
+  }
+
+  /**
+   * Translate posix file permissions to short mode.
+   *
+   * @param permission posix file permission
+   * @return mode for file
+   */
+  public static short translatePosixPermissionToMode(Set<PosixFilePermission> permission) {
     int mode = 0;
     for (PosixFilePermission action : PosixFilePermission.values()) {
       mode = mode << 1;
@@ -138,7 +139,6 @@ public final class FileUtils {
    *
    * @param path that will change owner
    * @param user the new user
-   * @throws IOException if the group is unable to be changed
    */
   public static void changeLocalFileUser(String path, String user) throws IOException {
     UserPrincipalLookupService lookupService =
@@ -182,12 +182,12 @@ public final class FileUtils {
    * permissions.
    *
    * @param path the path of the block
-   * @throws IOException when fails to create block path and parent directories with appropriate
-   *         permissions.
+   * @param workerDataFolderPermissions The permissions to set on the worker's data folder
    */
-  public static void createBlockPath(String path) throws IOException {
+  public static void createBlockPath(String path, String workerDataFolderPermissions)
+      throws IOException {
     try {
-      createStorageDirPath(PathUtils.getParent(path));
+      createStorageDirPath(PathUtils.getParent(path), workerDataFolderPermissions);
     } catch (InvalidPathException e) {
       throw new IOException("Failed to create block path, get parent path of " + path + "failed",
           e);
@@ -200,38 +200,28 @@ public final class FileUtils {
    * Moves file from one place to another, can across storage devices (e.g., from memory to SSD)
    * when {@link File#renameTo} may not work.
    *
-   * Current implementation uses {@link com.google.common.io.Files#move(File, File)}, may change if
-   * there is a better solution.
-   *
    * @param srcPath pathname string of source file
    * @param dstPath pathname string of destination file
-   * @throws IOException when fails to move
    */
   public static void move(String srcPath, String dstPath) throws IOException {
-    com.google.common.io.Files.move(new File(srcPath), new File(dstPath));
+    Files.move(Paths.get(srcPath), Paths.get(dstPath), StandardCopyOption.REPLACE_EXISTING);
   }
 
   /**
    * Deletes the file or directory.
    *
-   * Current implementation uses {@link java.io.File#delete()}, may change if there is a better
-   * solution.
-   *
    * @param path pathname string of file or directory
-   * @throws IOException when fails to delete
    */
   public static void delete(String path) throws IOException {
-    File file = new File(path);
-    if (!file.delete()) {
+    if (!Files.deleteIfExists(Paths.get(path))) {
       throw new IOException("Failed to delete " + path);
     }
   }
 
   /**
-   * Deletes a path recursively.
+   * Deletes a file or a directory, recursively if it is a directory.
    *
    * @param path pathname to be deleted
-   * @throws IOException when fails to delete
    */
   public static void deletePathRecursively(String path) throws IOException {
     Path root = Paths.get(path);
@@ -258,51 +248,47 @@ public final class FileUtils {
    * Creates the storage directory path, including any necessary but nonexistent parent directories.
    * If the directory already exists, do nothing.
    *
-   * Also, appropriate directory permissions (777 + StickyBit, namely "drwxrwxrwt") are set.
+   * Also, appropriate directory permissions (w/ StickyBit) are set.
    *
    * @param path storage directory path to create
-   * @throws IOException when fails to create storage directory path
+   * @param workerDataFolderPermissions the permissions to set for the worker's data folder
+   * @return true if the directory is created and false if the directory already exists
    */
-  public static void createStorageDirPath(String path) throws IOException {
-    File dir = new File(path);
-    if (dir.exists()) {
-      return;
+  public static boolean createStorageDirPath(String path, String workerDataFolderPermissions)
+      throws IOException {
+    if (Files.exists(Paths.get(path))) {
+      return false;
     }
-    if (!dir.mkdirs()) {
-      if (dir.exists()) {
-        // This dir has been created concurrently.
-        return;
-      }
-      throw new IOException("Failed to create folder " + path);
+    Path storagePath;
+    try {
+      storagePath = Files.createDirectories(Paths.get(path));
+    } catch (UnsupportedOperationException | SecurityException | IOException e) {
+      throw new IOException("Failed to create folder " + path, e);
     }
-    String absolutePath = dir.getAbsolutePath();
-    changeLocalFileToFullPermission(absolutePath);
+    String absolutePath = storagePath.toAbsolutePath().toString();
+    changeLocalFilePermission(absolutePath, workerDataFolderPermissions);
     setLocalDirStickyBit(absolutePath);
-    LOG.info("Folder {} was created!", path);
+    return true;
   }
 
   /**
    * Creates an empty file and its intermediate directories if necessary.
    *
    * @param filePath pathname string of the file to create
-   * @throws IOException if an I/O error occurred or file already exists
    */
   public static void createFile(String filePath) throws IOException {
-    File file = new File(filePath);
-    com.google.common.io.Files.createParentDirs(file);
-    if (!file.createNewFile()) {
-      throw new IOException("File already exists " + filePath);
-    }
+    Path storagePath = Paths.get(filePath);
+    Files.createDirectories(storagePath.getParent());
+    Files.createFile(storagePath);
   }
 
   /**
    * Creates an empty directory and its intermediate directories if necessary.
    *
    * @param path path of the directory to create
-   * @throws IOException if an I/O error occurred or directory already exists
    */
   public static void createDir(String path) throws IOException {
-    new File(path).mkdirs();
+    Files.createDirectories(Paths.get(path));
   }
 
   /**
@@ -312,7 +298,21 @@ public final class FileUtils {
    * @return true if path exists, false otherwise
    */
   public static boolean exists(String path) {
-    return new File(path).exists();
+    return Files.exists(Paths.get(path));
+  }
+
+  /**
+   * Checks if a storage directory path is accessible.
+   *
+   * @param path the given path
+   * @return true if path exists, false otherwise
+   */
+  public static boolean isStorageDirAccessible(String path) {
+    Path filePath = Paths.get(path);
+    return Files.exists(filePath)
+        && Files.isReadable(filePath)
+        && Files.isWritable(filePath)
+        && Files.isExecutable(filePath);
   }
 
   private FileUtils() {} // prevent instantiation

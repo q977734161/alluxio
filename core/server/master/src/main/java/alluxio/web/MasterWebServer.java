@@ -12,15 +12,25 @@
 package alluxio.web;
 
 import alluxio.Constants;
-import alluxio.master.AlluxioMasterService;
+import alluxio.client.file.FileSystem;
+import alluxio.conf.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.master.AlluxioMasterProcess;
 import alluxio.util.io.PathUtils;
 
 import com.google.common.base.Preconditions;
+import org.eclipse.jetty.servlet.DefaultServlet;
+import org.eclipse.jetty.servlet.ErrorPageErrorHandler;
 import org.eclipse.jetty.servlet.ServletHolder;
+import org.eclipse.jetty.util.resource.Resource;
 import org.glassfish.jersey.server.ResourceConfig;
 import org.glassfish.jersey.servlet.ServletContainer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.net.InetSocketAddress;
+import java.net.MalformedURLException;
 
 import javax.annotation.concurrent.NotThreadSafe;
 import javax.servlet.ServletException;
@@ -30,44 +40,30 @@ import javax.servlet.ServletException;
  */
 @NotThreadSafe
 public final class MasterWebServer extends WebServer {
+  private static final Logger LOG = LoggerFactory.getLogger(MasterWebServer.class);
 
   public static final String ALLUXIO_MASTER_SERVLET_RESOURCE_KEY = "Alluxio Master";
+  public static final String ALLUXIO_FILESYSTEM_CLIENT_RESOURCE_KEY =
+      "Alluxio Master FileSystem client";
+
+  private final FileSystem mFileSystem;
 
   /**
    * Creates a new instance of {@link MasterWebServer}.
    *
    * @param serviceName the service name
    * @param address the service address
-   * @param master the Alluxio master
+   * @param masterProcess the Alluxio master process
    */
   public MasterWebServer(String serviceName, InetSocketAddress address,
-      final AlluxioMasterService master) {
+      final AlluxioMasterProcess masterProcess) {
     super(serviceName, address);
-    Preconditions.checkNotNull(master, "Alluxio master cannot be null");
-
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceGeneralServlet(master)), "/home");
-    mWebAppContext.addServlet(new ServletHolder(
-        new WebInterfaceWorkersServlet(master.getBlockMaster())), "/workers");
-    mWebAppContext.addServlet(new ServletHolder(
-        new WebInterfaceConfigurationServlet(master.getFileSystemMaster())), "/configuration");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceBrowseServlet(master)), "/browse");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceMemoryServlet(master)), "/memory");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceDependencyServlet(master)),
-        "/dependency");
-    mWebAppContext.addServlet(new ServletHolder(
-        new WebInterfaceDownloadServlet(master.getFileSystemMaster())), "/download");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceDownloadLocalServlet()),
-        "/downloadLocal");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceBrowseLogsServlet(true)),
-        "/browseLogs");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceHeaderServlet()),
-        "/header");
-    mWebAppContext.addServlet(new ServletHolder(new WebInterfaceMasterMetricsServlet()),
-        "/metricsui");
-
+    Preconditions.checkNotNull(masterProcess, "Alluxio master cannot be null");
     // REST configuration
-    ResourceConfig config = new ResourceConfig().packages("alluxio.master", "alluxio.master.block",
-        "alluxio.master.file", "alluxio.master.lineage");
+    ResourceConfig config = new ResourceConfig()
+        .packages("alluxio.master", "alluxio.master.block", "alluxio.master.file")
+        .register(JacksonProtobufObjectMapperProvider.class);
+    mFileSystem = FileSystem.Factory.create(ServerConfiguration.global());
     // Override the init method to inject a reference to AlluxioMaster into the servlet context.
     // ServletContext may not be modified until after super.init() is called.
     ServletContainer servlet = new ServletContainer(config) {
@@ -76,11 +72,36 @@ public final class MasterWebServer extends WebServer {
       @Override
       public void init() throws ServletException {
         super.init();
-        getServletContext().setAttribute(ALLUXIO_MASTER_SERVLET_RESOURCE_KEY, master);
+        getServletContext().setAttribute(ALLUXIO_MASTER_SERVLET_RESOURCE_KEY, masterProcess);
+        getServletContext().setAttribute(ALLUXIO_FILESYSTEM_CLIENT_RESOURCE_KEY, mFileSystem);
       }
     };
 
     ServletHolder servletHolder = new ServletHolder("Alluxio Master Web Service", servlet);
-    mWebAppContext.addServlet(servletHolder, PathUtils.concatPath(Constants.REST_API_PREFIX, "*"));
+    mServletContextHandler
+        .addServlet(servletHolder, PathUtils.concatPath(Constants.REST_API_PREFIX, "*"));
+
+    // STATIC assets
+    try {
+      String resourceDirPathString =
+          ServerConfiguration.get(PropertyKey.WEB_RESOURCES) + "/master/build/";
+      File resourceDir = new File(resourceDirPathString);
+      mServletContextHandler.setBaseResource(Resource.newResource(resourceDir.getAbsolutePath()));
+      mServletContextHandler.setWelcomeFiles(new String[] {"index.html"});
+      mServletContextHandler.setResourceBase(resourceDir.getAbsolutePath());
+      mServletContextHandler.addServlet(DefaultServlet.class, "/");
+      ErrorPageErrorHandler errorHandler = new ErrorPageErrorHandler();
+      // TODO(william): consider a rewrite rule instead of an error handler
+      errorHandler.addErrorPage(404, "/");
+      mServletContextHandler.setErrorHandler(errorHandler);
+    } catch (MalformedURLException e) {
+      LOG.error("ERROR: resource path is malformed", e);
+    }
+  }
+
+  @Override
+  public void stop() throws Exception {
+    mFileSystem.close();
+    super.stop();
   }
 }

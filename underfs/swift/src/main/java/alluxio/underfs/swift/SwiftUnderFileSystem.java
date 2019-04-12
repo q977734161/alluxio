@@ -12,17 +12,21 @@
 package alluxio.underfs.swift;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.exception.ExceptionMessage;
+import alluxio.exception.FileDoesNotExistException;
 import alluxio.underfs.ObjectUnderFileSystem;
 import alluxio.underfs.UnderFileSystem;
+import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.options.OpenOptions;
 import alluxio.underfs.swift.http.SwiftDirectClient;
+import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.io.PathUtils;
 
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.SerializationConfig;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.javaswift.joss.client.factory.AccountConfig;
 import org.javaswift.joss.client.factory.AccountFactory;
 import org.javaswift.joss.client.factory.AuthenticationMethod;
@@ -53,7 +57,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(SwiftUnderFileSystem.class);
 
   /** Regexp for Swift container ACL separator, including optional whitespaces. */
   private static final String ACL_SEPARATOR_REGEXP = "\\s*,\\s*";
@@ -86,40 +90,53 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
    * Constructs a new Swift {@link UnderFileSystem}.
    *
    * @param uri the {@link AlluxioURI} for this UFS
+   * @param conf the configuration for this UFS
+   * @param alluxioConf Alluxio configuration
+   * @throws FileDoesNotExistException when specified container does not exist
    */
-  public SwiftUnderFileSystem(AlluxioURI uri) {
-    super(uri);
-    String containerName = getContainerName(uri);
+  public SwiftUnderFileSystem(AlluxioURI uri, UnderFileSystemConfiguration conf,
+      AlluxioConfiguration alluxioConf)
+      throws FileDoesNotExistException {
+    super(uri, conf, alluxioConf);
+    String containerName = UnderFileSystemUtils.getBucketName(uri);
     LOG.debug("Constructor init: {}", containerName);
     AccountConfig config = new AccountConfig();
 
     // Whether to run against a simulated Swift backend
     mSimulationMode = false;
-    if (Configuration.containsKey(PropertyKey.SWIFT_SIMULATION)) {
-      mSimulationMode = Configuration.getBoolean(PropertyKey.SWIFT_SIMULATION);
+    if (conf.isSet(PropertyKey.SWIFT_SIMULATION)) {
+      mSimulationMode = Boolean.valueOf(conf.get(PropertyKey.SWIFT_SIMULATION));
     }
 
     if (mSimulationMode) {
-      // We do not need access credentials in simulation mode
+      // We do not need access credentials in simulation mode.
       config.setMock(true);
       config.setMockAllowEveryone(true);
     } else {
-      if (Configuration.containsKey(PropertyKey.SWIFT_API_KEY)) {
-        config.setPassword(Configuration.get(PropertyKey.SWIFT_API_KEY));
-      } else if (Configuration.containsKey(PropertyKey.SWIFT_PASSWORD_KEY)) {
-        config.setPassword(Configuration.get(PropertyKey.SWIFT_PASSWORD_KEY));
+      if (conf.isSet(PropertyKey.SWIFT_API_KEY)) {
+        config.setPassword(conf.get(PropertyKey.SWIFT_API_KEY));
+      } else if (conf.isSet(PropertyKey.SWIFT_PASSWORD_KEY)) {
+        config.setPassword(conf.get(PropertyKey.SWIFT_PASSWORD_KEY));
       }
-      config.setAuthUrl(Configuration.get(PropertyKey.SWIFT_AUTH_URL_KEY));
-      String authMethod = Configuration.get(PropertyKey.SWIFT_AUTH_METHOD_KEY);
+      config.setAuthUrl(conf.get(PropertyKey.SWIFT_AUTH_URL_KEY));
+      String authMethod = conf.get(PropertyKey.SWIFT_AUTH_METHOD_KEY);
       if (authMethod != null) {
-        config.setUsername(Configuration.get(PropertyKey.SWIFT_USER_KEY));
-        config.setTenantName(Configuration.get(PropertyKey.SWIFT_TENANT_KEY));
+        config.setUsername(conf.get(PropertyKey.SWIFT_USER_KEY));
+        config.setTenantName(conf.get(PropertyKey.SWIFT_TENANT_KEY));
         switch (authMethod) {
           case Constants.SWIFT_AUTH_KEYSTONE:
             config.setAuthenticationMethod(AuthenticationMethod.KEYSTONE);
-            if (Configuration.containsKey(PropertyKey.SWIFT_REGION_KEY)) {
-              config.setPreferredRegion(Configuration.get(PropertyKey.SWIFT_REGION_KEY));
+            if (conf.isSet(PropertyKey.SWIFT_REGION_KEY)) {
+              config.setPreferredRegion(conf.get(PropertyKey.SWIFT_REGION_KEY));
             }
+            break;
+          case Constants.SWIFT_AUTH_KEYSTONE_V3:
+            if (conf.isSet(PropertyKey.SWIFT_REGION_KEY)) {
+              config.setPreferredRegion(conf.get(PropertyKey.SWIFT_REGION_KEY));
+            }
+            config.setAuthenticationMethod(AuthenticationMethod.EXTERNAL);
+            KeystoneV3AccessProvider accessProvider = new KeystoneV3AccessProvider(config);
+            config.setAccessProvider(accessProvider);
             break;
           case Constants.SWIFT_AUTH_SWIFTAUTH:
             // swiftauth authenticates directly against swift
@@ -128,22 +145,22 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
             // swiftauth requires authentication header to be of the form tenant:user.
             // JOSS however generates header of the form user:tenant.
             // To resolve this, we switch user with tenant
-            config.setTenantName(Configuration.get(PropertyKey.SWIFT_USER_KEY));
-            config.setUsername(Configuration.get(PropertyKey.SWIFT_TENANT_KEY));
+            config.setTenantName(conf.get(PropertyKey.SWIFT_USER_KEY));
+            config.setUsername(conf.get(PropertyKey.SWIFT_TENANT_KEY));
             break;
           default:
             config.setAuthenticationMethod(AuthenticationMethod.TEMPAUTH);
             // tempauth requires authentication header to be of the form tenant:user.
             // JOSS however generates header of the form user:tenant.
             // To resolve this, we switch user with tenant
-            config.setTenantName(Configuration.get(PropertyKey.SWIFT_USER_KEY));
-            config.setUsername(Configuration.get(PropertyKey.SWIFT_TENANT_KEY));
+            config.setTenantName(conf.get(PropertyKey.SWIFT_USER_KEY));
+            config.setUsername(conf.get(PropertyKey.SWIFT_TENANT_KEY));
         }
       }
     }
 
     ObjectMapper mapper = new ObjectMapper();
-    mapper.configure(SerializationConfig.Feature.WRAP_ROOT_VALUE, true);
+    mapper.configure(SerializationFeature.WRAP_ROOT_VALUE, true);
     mContainerName = containerName;
     mAccount = new AccountFactory(config).createAccount();
     // Do not allow container cache to avoid stale directory listings
@@ -151,11 +168,12 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
     mAccess = mAccount.authenticate();
     Container container = mAccount.getContainer(containerName);
     if (!container.exists()) {
-      container.create();
+      throw new FileDoesNotExistException(ExceptionMessage.PATH_DOES_NOT_EXIST
+          .getMessage("Container %s does not exist", containerName));
     }
 
     // Assume the Swift user name has 1-1 mapping to Alluxio username.
-    mAccountOwner = Configuration.get(PropertyKey.SWIFT_USER_KEY);
+    mAccountOwner = conf.get(PropertyKey.SWIFT_USER_KEY);
     short mode = (short) 0;
     List<String> readAcl =
         Arrays.asList(container.getContainerReadPermission().split(ACL_SEPARATOR_REGEXP));
@@ -189,24 +207,6 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
   // Setting Swift mode via Alluxio is not supported yet. This is a no-op.
   @Override
   public void setMode(String path, short mode) throws IOException {}
-
-  // Returns the account owner.
-  @Override
-  public String getOwner(String path) throws IOException {
-    return mAccountOwner;
-  }
-
-  // No group in Swift ACL, returns the account owner.
-  @Override
-  public String getGroup(String path) throws IOException {
-    return mAccountOwner;
-  }
-
-  // Returns the account owner's permission mode to the Swift container.
-  @Override
-  public short getMode(String path) throws IOException {
-    return mAccountMode;
-  }
 
   @Override
   protected boolean copyObject(String source, String destination) {
@@ -247,7 +247,8 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
   @Override
   protected OutputStream createObject(String key) throws IOException {
     if (mSimulationMode) {
-      return new SwiftMockOutputStream(mAccount, mContainerName, key);
+      return new SwiftMockOutputStream(mAccount, mContainerName, key,
+          mAlluxioConf.getList(PropertyKey.TMP_DIRS, ","));
     }
 
     return SwiftDirectClient.put(mAccess,
@@ -269,17 +270,6 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
     return false;
   }
 
-  /**
-   * Get container name from AlluxioURI.
-   *
-   * @param uri URI used to construct Swift UFS
-   * @return the container name from the given uri
-   */
-  protected static String getContainerName(AlluxioURI uri) {
-    // Authority contains the user, host and port portion of a URI
-    return uri.getAuthority();
-  }
-
   @Override
   protected String getFolderSuffix() {
     return FOLDER_SUFFIX;
@@ -292,7 +282,8 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
     String prefix = PathUtils.normalizePath(key, PATH_SEPARATOR);
     // In case key is root (empty string) do not normalize prefix
     prefix = prefix.equals(PATH_SEPARATOR) ? "" : prefix;
-    PaginationMap paginationMap = container.getPaginationMap(prefix, getListingChunkLength());
+    PaginationMap paginationMap = container.getPaginationMap(prefix,
+        getListingChunkLength(mAlluxioConf));
     if (paginationMap != null && paginationMap.getNumberOfPages() > 0) {
       return new SwiftObjectListingChunk(paginationMap, 0, recursive);
     }
@@ -314,7 +305,7 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     @Override
-    public String[] getObjectNames() {
+    public ObjectStatus[] getObjectStatuses() {
       ArrayDeque<DirectoryOrObject> objects = new ArrayDeque<>();
       Container container = mAccount.getContainer(mContainerName);
       if (!mRecursive) {
@@ -324,9 +315,15 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
         objects.addAll(container.list(mPaginationMap, mPage));
       }
       int i = 0;
-      String[] res = new String[objects.size()];
+      ObjectStatus[] res = new ObjectStatus[objects.size()];
       for (DirectoryOrObject object : objects) {
-        res[i++] = object.getName();
+        if (object.isObject()) {
+          res[i++] = new ObjectStatus(object.getName(), object.getAsObject().getEtag(),
+              object.getAsObject().getContentLength(),
+              object.getAsObject().getLastModifiedAsDate().getTime());
+        } else {
+          res[i++] = new ObjectStatus(object.getName());
+        }
       }
       return res;
     }
@@ -353,9 +350,16 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
     Container container = mAccount.getContainer(mContainerName);
     StoredObject meta = container.getObject(key);
     if (meta != null && meta.exists()) {
-      return new ObjectStatus(meta.getContentLength(), meta.getLastModifiedAsDate().getTime());
+      return new ObjectStatus(key, meta.getEtag(), meta.getContentLength(),
+          meta.getLastModifiedAsDate().getTime());
     }
     return null;
+  }
+
+  // No group in Swift ACL, returns the account owner for group.
+  @Override
+  protected ObjectPermissions getPermissions() {
+    return new ObjectPermissions(mAccountOwner, mAccountOwner, mAccountMode);
   }
 
   @Override
@@ -365,6 +369,7 @@ public class SwiftUnderFileSystem extends ObjectUnderFileSystem {
 
   @Override
   protected InputStream openObject(String key, OpenOptions options) throws IOException {
-    return new SwiftInputStream(mAccount, mContainerName, key, options.getOffset());
+    return new SwiftInputStream(mAccount, mContainerName, key, options.getOffset(),
+        mAlluxioConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
   }
 }

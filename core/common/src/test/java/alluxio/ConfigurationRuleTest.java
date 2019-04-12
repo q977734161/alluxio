@@ -11,8 +11,13 @@
 
 package alluxio;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+
 import com.google.common.collect.ImmutableMap;
-import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runners.model.Statement;
 
@@ -23,27 +28,30 @@ public final class ConfigurationRuleTest {
 
   @Test
   public void changeConfiguration() throws Throwable {
+    InstancedConfiguration conf = ConfigurationTestUtils.defaults();
     Statement statement = new Statement() {
       @Override
       public void evaluate() throws Throwable {
-        Assert.assertEquals("testValue", Configuration.get(PropertyKey.MASTER_ADDRESS));
+        assertEquals("testValue", conf.get(PropertyKey.MASTER_HOSTNAME));
       }
     };
-    new ConfigurationRule(ImmutableMap.of(PropertyKey.MASTER_ADDRESS, "testValue"))
+    new ConfigurationRule(ImmutableMap.of(PropertyKey.MASTER_HOSTNAME, "testValue"), conf)
         .apply(statement, null).evaluate();
   }
 
   @Test
   public void changeConfigurationForDefaultNullValue() throws Throwable {
+    InstancedConfiguration conf = ConfigurationTestUtils.defaults();
+
     Statement statement = new Statement() {
       @Override
       public void evaluate() throws Throwable {
-        Assert.assertEquals("testValue", Configuration.get(PropertyKey.SECURITY_LOGIN_USERNAME));
+        assertEquals("testValue", conf.get(PropertyKey.SECURITY_LOGIN_USERNAME));
       }
     };
-    Assert.assertFalse(Configuration.containsKey(PropertyKey.SECURITY_LOGIN_USERNAME));
-    new ConfigurationRule(ImmutableMap.of(PropertyKey.SECURITY_LOGIN_USERNAME, "testValue"))
+    assertFalse(conf.isSet(PropertyKey.SECURITY_LOGIN_USERNAME));
+    new ConfigurationRule(ImmutableMap.of(PropertyKey.SECURITY_LOGIN_USERNAME, "testValue"), conf)
         .apply(statement, null).evaluate();
-    Assert.assertFalse(Configuration.containsKey(PropertyKey.SECURITY_LOGIN_USERNAME));
+    assertFalse(conf.isSet(PropertyKey.SECURITY_LOGIN_USERNAME));
   }
 }

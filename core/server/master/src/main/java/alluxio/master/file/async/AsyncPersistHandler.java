@@ -12,16 +12,16 @@
 package alluxio.master.file.async;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
-import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.AccessControlException;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.InvalidPathException;
+import alluxio.exception.status.UnavailableException;
 import alluxio.master.file.meta.FileSystemMasterView;
-import alluxio.thrift.PersistFile;
 import alluxio.util.CommonUtils;
+import alluxio.wire.PersistFile;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,7 +42,7 @@ public interface AsyncPersistHandler {
    */
   @ThreadSafe
   class Factory {
-    public static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+    public static final Logger LOG = LoggerFactory.getLogger(AsyncPersistHandler.Factory.class);
 
     private Factory() {} // prevent instantiation
 
@@ -53,16 +53,10 @@ public interface AsyncPersistHandler {
      * @return the generated {@link AsyncPersistHandler}
      */
     public static AsyncPersistHandler create(FileSystemMasterView view) {
-      try {
-        return CommonUtils.createNewClassInstance(Configuration.<AsyncPersistHandler>getClass(
-            PropertyKey.MASTER_FILE_ASYNC_PERSIST_HANDLER),
-            new Class[] {FileSystemMasterView.class},
-            new Object[] {view});
-      } catch (Exception e) {
-        LOG.error("Failed to instantiate the async handler of class "
-            + PropertyKey.MASTER_FILE_ASYNC_PERSIST_HANDLER + ". Use the default handler instead");
-        return new DefaultAsyncPersistHandler(view);
-      }
+      return CommonUtils.createNewClassInstance(
+          ServerConfiguration
+              .<AsyncPersistHandler>getClass(PropertyKey.MASTER_FILE_ASYNC_PERSIST_HANDLER),
+          new Class[] {FileSystemMasterView.class}, new Object[] {view});
     }
   }
 
@@ -70,9 +64,8 @@ public interface AsyncPersistHandler {
    * Schedules a file for async persistence.
    *
    * @param path the path to the file
-   * @throws AlluxioException if the scheduling fails
    */
-  void scheduleAsyncPersistence(AlluxioURI path) throws AlluxioException;
+  void scheduleAsyncPersistence(AlluxioURI path) throws AlluxioException, UnavailableException;
 
   /**
    * Polls the files for persistence on the given worker.

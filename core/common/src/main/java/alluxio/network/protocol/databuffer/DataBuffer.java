@@ -11,6 +11,8 @@
 
 package alluxio.network.protocol.databuffer;
 
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 
 /**
@@ -51,12 +53,27 @@ public interface DataBuffer {
   void readBytes(byte[] dst, int dstIndex, int length);
 
   /**
+   * Transfers this buffer's data to the given stream.
+   *
+   * @param outputStream the stream to transfer data to
+   * @param length length of the data to be transferred
+   */
+  void readBytes(OutputStream outputStream, int length) throws IOException;
+
+  /**
+   * Transfers this buffer's data to the given {@link ByteBuffer}.
+   *
+   * @param outputBuf the buffer to transfer data to
+   */
+  void readBytes(ByteBuffer outputBuf);
+
+  /**
    * @return the number of readable bytes remaining
    */
   int readableBytes();
 
   /**
-   * Release the underlying buffer of this DataBuffer if no longer needed.
+   * Releases the underlying buffer of this DataBuffer if no longer needed.
    */
   void release();
 }

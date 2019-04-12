@@ -11,8 +11,6 @@
 
 package alluxio.metrics;
 
-import alluxio.Constants;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,12 +25,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.annotation.concurrent.NotThreadSafe;
+
 /**
  * Configurations used by the metrics system.
  */
 @NotThreadSafe
 public final class MetricsConfig {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(MetricsConfig.class);
   private Properties mProperties;
 
   /**
@@ -71,8 +70,8 @@ public final class MetricsConfig {
    * properties that are grouped by the prefix.
    *
    * @param prop the original properties
-   * @param regex specifies the prefix and suffix pattern
-   * @return a {@code Map} maps from the prefix to its properties
+   * @param regex prefix and suffix pattern
+   * @return a {@code Map} from the prefix to its properties
    */
   public static Map<String, Properties> subProperties(Properties prop, String regex) {
     Map<String, Properties> subProperties = new HashMap<>();
@@ -106,7 +105,7 @@ public final class MetricsConfig {
   }
 
   /**
-   * This method removes the instance prefix in the properties. This is to make the configuration
+   * Removes the instance prefix in the properties. This is to make the configuration
    * parsing logic backward compatible with old configuration format.
    */
   private void removeInstancePrefix() {

@@ -11,7 +11,6 @@
 
 package alluxio.yarn;
 
-import alluxio.Constants;
 import alluxio.exception.ExceptionMessage;
 
 import com.google.common.collect.ConcurrentHashMultiset;
@@ -35,7 +34,8 @@ import java.util.concurrent.CountDownLatch;
  * A class for negotiating with YARN to allocate containers.
  */
 public final class ContainerAllocator {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(ContainerAllocator.class);
+
   private static final int MAX_WORKER_CONTAINER_REQUEST_ATTEMPTS = 20;
 
   private final String mContainerName;
@@ -87,6 +87,10 @@ public final class ContainerAllocator {
     mAllocatedContainers = new ArrayList<>();
   }
 
+  /**
+   * @return a list of all hosts in the cluster which haven't yet reached
+   *         the containers per host limit
+   */
   private String[] getPotentialWorkerHosts() throws YarnException, IOException {
     List<String> unusedHosts = Lists.newArrayList();
     for (String host : YarnUtils.getNodeHosts(mYarnClient)) {
@@ -101,7 +105,6 @@ public final class ContainerAllocator {
    * Allocates the containers specified by the constructor.
    *
    * @return the allocated containers
-   * @throws Exception if an error occurs
    */
   public List<Container> allocateContainers() throws Exception {
     for (int attempt = 0; attempt < MAX_WORKER_CONTAINER_REQUEST_ATTEMPTS; attempt++) {

@@ -11,8 +11,11 @@
 
 package alluxio.underfs.local;
 
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.InstancedConfiguration;
 import alluxio.underfs.UnderFileSystemFactory;
-import alluxio.underfs.UnderFileSystemRegistry;
+import alluxio.underfs.UnderFileSystemFactoryRegistry;
+import alluxio.util.ConfigurationUtils;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -27,12 +30,15 @@ public class LocalUnderFileSystemFactoryTest {
    */
   @Test
   public void factory() {
-    UnderFileSystemFactory factory = UnderFileSystemRegistry.find("/local/test/path");
-    UnderFileSystemFactory factory2 = UnderFileSystemRegistry.find("file://local/test/path");
-    UnderFileSystemFactory factory3 = UnderFileSystemRegistry.find("hdfs://test-bucket/path");
-    UnderFileSystemFactory factory4 = UnderFileSystemRegistry.find("R:\\ramfs\\");
-    UnderFileSystemFactory factory5 = UnderFileSystemRegistry.find("file://R:/famfs");
-    UnderFileSystemFactory factory6 = UnderFileSystemRegistry.find("R:/ramfs/");
+    AlluxioConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
+    UnderFileSystemFactory factory = UnderFileSystemFactoryRegistry.find("/local/test/path", conf);
+    UnderFileSystemFactory factory2 = UnderFileSystemFactoryRegistry.find("file://local/test/path",
+        conf);
+    UnderFileSystemFactory factory3 =
+        UnderFileSystemFactoryRegistry.find("hdfs://test-bucket/path", conf);
+    UnderFileSystemFactory factory4 = UnderFileSystemFactoryRegistry.find("R:\\ramfs\\", conf);
+    UnderFileSystemFactory factory5 = UnderFileSystemFactoryRegistry.find("file://R:/famfs", conf);
+    UnderFileSystemFactory factory6 = UnderFileSystemFactoryRegistry.find("R:/ramfs/", conf);
 
     Assert.assertNotNull(
         "A UnderFileSystemFactory should exist for local paths when using this module", factory);

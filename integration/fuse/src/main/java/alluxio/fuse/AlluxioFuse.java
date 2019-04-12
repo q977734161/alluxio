@@ -11,10 +11,11 @@
 
 package alluxio.fuse;
 
-import alluxio.Configuration;
-import alluxio.Constants;
-import alluxio.PropertyKey;
 import alluxio.client.file.FileSystem;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.util.ConfigurationUtils;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -29,7 +30,6 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
-
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -37,7 +37,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class AlluxioFuse {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(AlluxioFuse.class);
 
   // prevent instantiation
   private AlluxioFuse() {
@@ -45,7 +45,7 @@ public final class AlluxioFuse {
 
   /**
    * Running this class will mount the file system according to
-   * the options passed to this function {@link #parseOptions(String[])}.
+   * the options passed to this function {@link #parseOptions(String[], AlluxioConfiguration)}.
    * The user-space fuse application will stay on the foreground and keep
    * the file system mounted. The user can unmount the file system by
    * gracefully killing (SIGINT) the process.
@@ -53,13 +53,14 @@ public final class AlluxioFuse {
    * @param args arguments to run the command line
    */
   public static void main(String[] args) {
-    final AlluxioFuseOptions opts = parseOptions(args);
+    AlluxioConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
+    final AlluxioFuseOptions opts = parseOptions(args, conf);
     if (opts == null) {
       System.exit(1);
     }
 
-    final FileSystem tfs = FileSystem.Factory.get();
-    final AlluxioFuseFileSystem fs = new AlluxioFuseFileSystem(tfs, opts);
+    final FileSystem tfs = FileSystem.Factory.create(conf);
+    final AlluxioFuseFileSystem fs = new AlluxioFuseFileSystem(tfs, opts, conf);
     final List<String> fuseOpts = opts.getFuseOpts();
     // Force direct_io in FUSE: writes and reads bypass the kernel page
     // cache and go directly to alluxio. This avoids extra memory copies
@@ -80,18 +81,18 @@ public final class AlluxioFuse {
    * @param args CLI args
    * @return Alluxio-FUSE configuration options
    */
-  private static AlluxioFuseOptions parseOptions(String[] args) {
+  private static AlluxioFuseOptions parseOptions(String[] args, AlluxioConfiguration alluxioConf) {
     final Options opts = new Options();
     final Option mntPoint = Option.builder("m")
         .hasArg()
-        .required(false)
+        .required(true)
         .longOpt("mount-point")
         .desc("Desired local mount point for alluxio-fuse.")
         .build();
 
     final Option alluxioRoot = Option.builder("r")
         .hasArg()
-        .required(false)
+        .required(true)
         .longOpt("alluxio-root")
         .desc("Path within alluxio that will be used as the root of the FUSE mount "
             + "(e.g., /users/foo; defaults to /)")
@@ -142,21 +143,11 @@ public final class AlluxioFuse {
       // check if the user has specified his own max_write, otherwise get it
       // from conf
       if (noUserMaxWrite) {
-        final long maxWrite = Configuration.getLong(PropertyKey.FUSE_MAXWRITE_BYTES);
+        final long maxWrite = alluxioConf.getBytes(PropertyKey.FUSE_MAXWRITE_BYTES);
         fuseOpts.add(String.format("-omax_write=%d", maxWrite));
       }
 
-      if (mntPointValue == null) {
-        mntPointValue = Configuration.get(PropertyKey.FUSE_MOUNT_DEFAULT);
-        LOG.info("Mounting on default {}", mntPointValue);
-      }
-
-      if (alluxioRootValue == null) {
-        alluxioRootValue = Configuration.get(PropertyKey.FUSE_FS_ROOT);
-        LOG.info("Using default alluxio root {}", alluxioRootValue);
-      }
-
-      final boolean fuseDebug = Configuration.getBoolean(PropertyKey.FUSE_DEBUG_ENABLED);
+      final boolean fuseDebug = alluxioConf.getBoolean(PropertyKey.FUSE_DEBUG_ENABLED);
 
       return new AlluxioFuseOptions(mntPointValue, alluxioRootValue, fuseDebug, fuseOpts);
     } catch (ParseException e) {

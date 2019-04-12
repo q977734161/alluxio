@@ -12,7 +12,8 @@
 package alluxio.master.file.meta.options;
 
 import alluxio.AlluxioURI;
-import alluxio.master.file.options.MountOptions;
+import alluxio.grpc.MountPOptions;
+import alluxio.wire.MountPointInfo;
 
 import com.google.common.base.Preconditions;
 
@@ -24,19 +25,32 @@ import javax.annotation.concurrent.ThreadSafe;
  * This class holds information about a mount point.
  */
 @ThreadSafe
-public final class MountInfo {
+public class MountInfo {
+  private final AlluxioURI mAlluxioUri;
   private final AlluxioURI mUfsUri;
-  private final MountOptions mOptions;
+  private final MountPOptions mOptions;
+  private final long mMountId;
 
   /**
    * Creates a new instance of {@code MountInfo}.
    *
+   * @param alluxioUri an Alluxio path URI
    * @param ufsUri a UFS path URI
+   * @param mountId the id of the mount
    * @param options the mount options
    */
-  public MountInfo(AlluxioURI ufsUri, MountOptions options) {
-    mUfsUri = Preconditions.checkNotNull(ufsUri);
+  public MountInfo(AlluxioURI alluxioUri, AlluxioURI ufsUri, long mountId, MountPOptions options) {
+    mAlluxioUri = Preconditions.checkNotNull(alluxioUri, "alluxioUri");
+    mUfsUri = Preconditions.checkNotNull(ufsUri, "ufsUri");
+    mMountId = mountId;
     mOptions = options;
+  }
+
+  /**
+   * @return the {@link AlluxioURI} of the Alluxio path
+   */
+  public AlluxioURI getAlluxioUri() {
+    return mAlluxioUri;
   }
 
   /**
@@ -47,10 +61,29 @@ public final class MountInfo {
   }
 
   /**
-   * @return the {@link MountOptions} for the mount point
+   * @return the {@link MountPOptions} for the mount point
    */
-  public MountOptions getOptions() {
+  public MountPOptions getOptions() {
     return mOptions;
+  }
+
+  /**
+   * @return the id of the mount
+   */
+  public long getMountId() {
+    return mMountId;
+  }
+
+  /**
+   * @return the {@link MountPointInfo} for the mount point
+   */
+  public MountPointInfo toMountPointInfo() {
+    MountPointInfo info = new MountPointInfo();
+    info.setUfsUri(mUfsUri.toString());
+    info.setReadOnly(mOptions.getReadOnly());
+    info.setProperties(mOptions.getProperties());
+    info.setShared(mOptions.getShared());
+    return info;
   }
 
   @Override
@@ -62,11 +95,15 @@ public final class MountInfo {
       return false;
     }
     MountInfo that = (MountInfo) o;
-    return mUfsUri.equals(that.getUfsUri()) && mOptions.equals(that.getOptions());
+    return mMountId == that.getMountId()
+        && mAlluxioUri.equals(that.getAlluxioUri())
+        && mUfsUri.equals(that.getUfsUri())
+        && mOptions.getReadOnly() == (that.getOptions().getReadOnly())
+        && mOptions.getShared() == (that.getOptions().getShared());
   }
 
   @Override
   public int hashCode() {
-    return Objects.hash(mUfsUri, mOptions);
+    return Objects.hash(mMountId, mAlluxioUri, mUfsUri, mOptions);
   }
 }

@@ -11,60 +11,57 @@
 
 package alluxio;
 
-import alluxio.exception.AlluxioException;
-import alluxio.exception.ConnectionFailedException;
+import alluxio.conf.PropertyKey;
 import alluxio.exception.ExceptionMessage;
 import alluxio.exception.PreconditionMessage;
-import alluxio.retry.ExponentialBackoffRetry;
+import alluxio.exception.status.AlluxioStatusException;
+import alluxio.exception.status.FailedPreconditionException;
+import alluxio.exception.status.UnauthenticatedException;
+import alluxio.exception.status.UnavailableException;
+import alluxio.grpc.GetServiceVersionPRequest;
+import alluxio.grpc.GrpcChannelBuilder;
+import alluxio.grpc.GrpcServerAddress;
+import alluxio.grpc.ServiceType;
+import alluxio.grpc.ServiceVersionClientServiceGrpc;
+import alluxio.metrics.CommonMetrics;
+import alluxio.metrics.Metric;
+import alluxio.metrics.MetricsSystem;
 import alluxio.retry.RetryPolicy;
-import alluxio.security.authentication.TransportProvider;
-import alluxio.thrift.AlluxioService;
-import alluxio.thrift.AlluxioTException;
-import alluxio.thrift.ThriftIOException;
+import alluxio.retry.RetryUtils;
+import alluxio.security.LoginUser;
+import alluxio.grpc.GrpcChannel;
+import alluxio.util.SecurityUtils;
 
+import com.codahale.metrics.Timer;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
-import org.apache.thrift.TException;
-import org.apache.thrift.protocol.TBinaryProtocol;
-import org.apache.thrift.protocol.TMultiplexedProtocol;
-import org.apache.thrift.protocol.TProtocol;
-import org.apache.thrift.transport.TTransportException;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.regex.Pattern;
+import java.nio.channels.UnresolvedAddressException;
+import java.util.function.Supplier;
 
 import javax.annotation.concurrent.ThreadSafe;
-import javax.security.auth.Subject;
 
 /**
  * The base class for clients.
  */
-// TODO(peis): Consolidate this to ThriftClientPool.
 @ThreadSafe
 public abstract class AbstractClient implements Client {
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractClient.class);
 
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private final Supplier<RetryPolicy> mRetryPolicySupplier;
 
-  /** The pattern of exception message when client and server transport frame sizes do not match. */
-  private static final Pattern FRAME_SIZE_EXCEPTION_PATTERN =
-      Pattern.compile("Frame size \\((\\d+)\\) larger than max length");
+  protected InetSocketAddress mAddress;
 
-  private static final int BASE_SLEEP_MS =
-      Configuration.getInt(PropertyKey.USER_RPC_RETRY_BASE_SLEEP_MS);
-  private static final int MAX_SLEEP_MS =
-      Configuration.getInt(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS);
+  /** Underlying channel to the target service. */
+  protected GrpcChannel mChannel;
 
-  /** The number of times to retry a particular RPC. */
-  protected static final int RPC_MAX_NUM_RETRY =
-      Configuration.getInt(PropertyKey.USER_RPC_RETRY_MAX_NUM_RETRY);
-
-  protected final String mMode;
-
-  protected InetSocketAddress mAddress = null;
-  protected TProtocol mProtocol = null;
+  /** Used to query service version for the remote service type. */
+  protected ServiceVersionClientServiceGrpc.ServiceVersionClientServiceBlockingStub mVersionService;
 
   /** Is true if this client is currently connected. */
   protected boolean mConnected = false;
@@ -73,37 +70,57 @@ public abstract class AbstractClient implements Client {
    * Is true if this client was closed by the user. No further actions are possible after the client
    * is closed.
    */
-  protected boolean mClosed = false;
+  protected volatile boolean mClosed = false;
 
   /**
    * Stores the service version; used for detecting incompatible client-server pairs.
    */
   protected long mServiceVersion;
 
-  /** Handler to the transport provider according to the authentication type. */
-  protected final TransportProvider mTransportProvider;
-
-  private final Subject mParentSubject;
+  protected ClientContext mContext;
 
   /**
    * Creates a new client base.
    *
-   * @param subject the parent subject, set to null if not present
+   * @param context information required to connect to Alluxio
    * @param address the address
-   * @param mode the mode of the client for display
    */
-  public AbstractClient(Subject subject, InetSocketAddress address, String mode) {
-    mAddress = Preconditions.checkNotNull(address);
-    mMode = mode;
-    mServiceVersion = Constants.UNKNOWN_SERVICE_VERSION;
-    mTransportProvider = TransportProvider.Factory.create();
-    mParentSubject = subject;
+  public AbstractClient(ClientContext context, InetSocketAddress address) {
+    this(context, address, () -> RetryUtils.defaultClientRetry(
+        context.getConf().getDuration(PropertyKey.USER_RPC_RETRY_MAX_DURATION),
+        context.getConf().getDuration(PropertyKey.USER_RPC_RETRY_BASE_SLEEP_MS),
+        context.getConf().getDuration(PropertyKey.USER_RPC_RETRY_MAX_SLEEP_MS)));
   }
 
   /**
-   * @return a Thrift service client
+   * Creates a new client base.
+   *
+   * @param context information required to connect to Alluxio
+   * @param address the address
+   * @param retryPolicySupplier factory for retry policies to be used when performing RPCs
    */
-  protected abstract AlluxioService.Client getClient();
+  public AbstractClient(ClientContext context, InetSocketAddress address,
+      Supplier<RetryPolicy> retryPolicySupplier) {
+    mAddress = address;
+    mContext = Preconditions.checkNotNull(context);
+    mRetryPolicySupplier = retryPolicySupplier;
+    mServiceVersion = Constants.UNKNOWN_SERVICE_VERSION;
+  }
+
+  /**
+   * @return the type of remote service
+   */
+  protected abstract ServiceType getRemoteServiceType();
+
+  protected long getRemoteServiceVersion() throws AlluxioStatusException {
+    return retryRPC(new RpcCallable<Long>() {
+      public Long call() {
+        return mVersionService.getServiceVersion(
+            GetServiceVersionPRequest.newBuilder().setServiceType(getRemoteServiceType()).build())
+            .getVersion();
+      }
+    });
+  }
 
   /**
    * @return a string representing the specific service
@@ -118,19 +135,14 @@ public abstract class AbstractClient implements Client {
   /**
    * Checks that the service version is compatible with the client.
    *
-   * @param client the service client
-   * @param version the client version
+   * @param clientVersion the client version
    */
-  protected void checkVersion(AlluxioService.Client client, long version) throws IOException {
+  protected void checkVersion(long clientVersion) throws IOException {
     if (mServiceVersion == Constants.UNKNOWN_SERVICE_VERSION) {
-      try {
-        mServiceVersion = client.getServiceVersion();
-      } catch (TException e) {
-        throw new IOException(e);
-      }
-      if (mServiceVersion != version) {
+      mServiceVersion = getRemoteServiceVersion();
+      if (mServiceVersion != clientVersion) {
         throw new IOException(ExceptionMessage.INCOMPATIBLE_VERSION.getMessage(getServiceName(),
-            version, mServiceVersion));
+            clientVersion, mServiceVersion));
       }
     }
   }
@@ -141,6 +153,21 @@ public abstract class AbstractClient implements Client {
    */
   protected void afterConnect() throws IOException {
     // Empty implementation.
+  }
+
+  /**
+   * This method is called before the connection is connected. Implementations should add any
+   * additional operations before the connection is connected.
+   * loading the cluster defaults
+   */
+  protected void beforeConnect()
+      throws IOException {
+    // Bootstrap once for clients
+    if (!isConnected()) {
+      if (!mContext.getConf().clusterDefaultsLoaded()) {
+        mContext.updateWithClusterDefaults(mAddress);
+      }
+    }
   }
 
   /**
@@ -161,66 +188,84 @@ public abstract class AbstractClient implements Client {
 
   /**
    * Connects with the remote.
-   *
-   * @throws IOException if an I/O error occurs
-   * @throws ConnectionFailedException if network connection failed
    */
-  public synchronized void connect() throws IOException, ConnectionFailedException {
+  @Override
+  public synchronized void connect() throws AlluxioStatusException {
     if (mConnected) {
       return;
     }
     disconnect();
     Preconditions.checkState(!mClosed, "Client is closed, will not try to connect.");
 
-    int maxConnectsTry = Configuration.getInt(PropertyKey.MASTER_RETRY);
-    RetryPolicy retry =
-        new ExponentialBackoffRetry(BASE_SLEEP_MS, MAX_SLEEP_MS, maxConnectsTry);
-    while (!mClosed) {
-      mAddress = getAddress();
-      LOG.info("Alluxio client (version {}) is trying to connect with {} {} @ {}",
-          RuntimeConstants.VERSION, getServiceName(), mMode, mAddress);
+    IOException lastConnectFailure = null;
+    RetryPolicy retryPolicy = mRetryPolicySupplier.get();
 
-      TProtocol binaryProtocol =
-          new TBinaryProtocol(mTransportProvider.getClientTransport(mParentSubject, mAddress));
-      mProtocol = new TMultiplexedProtocol(binaryProtocol, getServiceName());
+    while (retryPolicy.attempt()) {
+      if (mClosed) {
+        throw new FailedPreconditionException("Failed to connect: client has been closed");
+      }
+      // Re-query the address in each loop iteration in case it has changed (e.g. master
+      // failover).
       try {
-        mProtocol.getTransport().open();
-        LOG.info("Client registered with {} {} @ {}", getServiceName(), mMode, mAddress);
+        mAddress = getAddress();
+      } catch (UnavailableException e) {
+        LOG.warn("Failed to determine {} rpc address ({}): {}",
+            getServiceName(), retryPolicy.getAttemptCount(), e.toString());
+        continue;
+      }
+      if (mAddress.isUnresolved()) {
+        // Sometimes the acquired addressed wasn't resolved, retry resolving before
+        // using it to connect.
+        LOG.info("Retry resolving address {}", mAddress);
+        // Creates a new InetSocketAddress to force resolving the hostname again.
+        mAddress = new InetSocketAddress(mAddress.getHostName(), mAddress.getPort());
+        if (mAddress.isUnresolved()) {
+          LOG.warn("Failed to resolve address on retry {}", mAddress);
+        }
+      }
+      try {
+        beforeConnect();
+        LOG.info("Alluxio client (version {}) is trying to connect with {} @ {}",
+            RuntimeConstants.VERSION, getServiceName(), mAddress);
+        mChannel = GrpcChannelBuilder
+            .newBuilder(new GrpcServerAddress(mAddress), mContext.getConf())
+            .setSubject(mContext.getSubject())
+            .build();
+        // Create stub for version service on host
+        mVersionService = ServiceVersionClientServiceGrpc.newBlockingStub(mChannel);
         mConnected = true;
         afterConnect();
-        checkVersion(getClient(), getServiceVersion());
+        checkVersion(getServiceVersion());
+        LOG.info("Alluxio client (version {}) is connected with {} @ {}", RuntimeConstants.VERSION,
+            getServiceName(), mAddress);
         return;
       } catch (IOException e) {
-        if (e.getMessage() != null && FRAME_SIZE_EXCEPTION_PATTERN.matcher(e.getMessage()).find()) {
-          // See an error like "Frame size (67108864) larger than max length (16777216)!",
-          // pointing to the helper page.
-          String message = String.format("Failed to connect to %s %s @ %s: %s. "
-              + "This exception may be caused by incorrect network configuration. "
-              + "Please consult %s for common solutions to address this problem.",
-              getServiceName(), mMode, mAddress, e.getMessage(),
-              RuntimeConstants.ALLUXIO_DEBUG_DOCS_URL);
-          throw new IOException(message, e);
-        }
-        throw e;
-      } catch (TTransportException e) {
-        LOG.error("Failed to connect (" + retry.getRetryCount() + ") to " + getServiceName() + " "
-            + mMode + " @ " + mAddress + " : " + e.getMessage());
-        if (e.getCause() instanceof java.net.SocketTimeoutException) {
-          // Do not retry if socket timeout.
-          String message = "Thrift transport open times out. Please check whether the "
-              + "authentication types match between client and server. Note that NOSASL client "
-              + "is not able to connect to servers with SIMPLE security mode.";
-          throw new IOException(message, e);
-        }
-        // TODO(peis): Consider closing the connection here as well.
-        if (!retry.attemptRetry()) {
-          break;
-        }
+        LOG.warn("Failed to connect ({}) with {} @ {}: {}", retryPolicy.getAttemptCount(),
+            getServiceName(), mAddress, e.getMessage());
+        lastConnectFailure = e;
       }
     }
     // Reaching here indicates that we did not successfully connect.
-    throw new ConnectionFailedException("Failed to connect to " + getServiceName() + " " + mMode
-        + " @ " + mAddress + " after " + (retry.getRetryCount()) + " attempts");
+
+    if (mChannel != null) {
+      mChannel.shutdown();
+    }
+
+    if (mAddress == null) {
+      throw new UnavailableException(
+          String.format("Failed to determine address for %s after %s attempts", getServiceName(),
+              retryPolicy.getAttemptCount()));
+    }
+
+    /**
+     * Throw as-is if {@link UnauthenticatedException} occurred.
+     */
+    if (lastConnectFailure instanceof UnauthenticatedException) {
+      throw (AlluxioStatusException) lastConnectFailure;
+    }
+
+    throw new UnavailableException(String.format("Failed to connect to %s @ %s after %s attempts",
+        getServiceName(), mAddress, retryPolicy.getAttemptCount()), lastConnectFailure);
   }
 
   /**
@@ -229,10 +274,10 @@ public abstract class AbstractClient implements Client {
    */
   public synchronized void disconnect() {
     if (mConnected) {
-      Preconditions.checkNotNull(mProtocol, PreconditionMessage.PROTOCOL_NULL_WHEN_CONNECTED);
-      LOG.debug("Disconnecting from the {} {} {}", getServiceName(), mMode, mAddress);
+      Preconditions.checkNotNull(mChannel, PreconditionMessage.CHANNEL_NULL_WHEN_CONNECTED);
+      LOG.debug("Disconnecting from the {} @ {}", getServiceName(), mAddress);
       beforeDisconnect();
-      mProtocol.getTransport().close();
+      mChannel.shutdown();
       mConnected = false;
       afterDisconnect();
     }
@@ -255,18 +300,8 @@ public abstract class AbstractClient implements Client {
     mClosed = true;
   }
 
-  /**
-   * Closes the connection, then queries and sets current remote address.
-   */
-  public synchronized void resetConnection() {
-    disconnect();
-    mAddress = getAddress();
-  }
-
-  /**
-   * @return the {@link InetSocketAddress} of the remote
-   */
-  protected synchronized InetSocketAddress getAddress() {
+  @Override
+  public synchronized InetSocketAddress getAddress() throws UnavailableException {
     return mAddress;
   }
 
@@ -280,97 +315,102 @@ public abstract class AbstractClient implements Client {
      * The task where RPC happens.
      *
      * @return RPC result
-     * @throws TException when any exception defined in thrift happens
+     * @throws StatusRuntimeException when any exception defined in gRPC happens
      */
-    V call() throws TException;
-  }
-
-  /**
-   * Same with {@link RpcCallable} except that this RPC call throws {@link AlluxioTException} and
-   * is to be executed in {@link #retryRPC(RpcCallableThrowsAlluxioTException)}.
-   *
-   * @param <V> the return value of {@link #call()}
-   */
-  protected interface RpcCallableThrowsAlluxioTException<V> {
-    /**
-     * The task where RPC happens.
-     *
-     * @return RPC result
-     * @throws AlluxioTException when any {@link AlluxioException} happens during RPC and is wrapped
-     *         into {@link AlluxioTException}
-     * @throws TException when any exception defined in thrift happens
-     */
-    V call() throws AlluxioTException, TException;
+    V call() throws StatusRuntimeException;
   }
 
   /**
    * Tries to execute an RPC defined as a {@link RpcCallable}.
    *
-   * If a non-Alluxio thrift exception occurs, a reconnection will be tried through
+   * If a {@link UnavailableException} occurs, a reconnection will be tried through
    * {@link #connect()} and the action will be re-executed.
    *
    * @param rpc the RPC call to be executed
    * @param <V> type of return value of the RPC call
    * @return the return value of the RPC call
-   * @throws IOException when retries exceeds {@link #RPC_MAX_NUM_RETRY} or {@link #close()} has
-   *         been called before calling this method or during the retry
-   * @throws ConnectionFailedException if network connection failed
    */
-  protected synchronized <V> V retryRPC(RpcCallable<V> rpc) throws IOException,
-      ConnectionFailedException {
-    RetryPolicy retryPolicy =
-        new ExponentialBackoffRetry(BASE_SLEEP_MS, MAX_SLEEP_MS, RPC_MAX_NUM_RETRY);
-    while (!mClosed) {
-      connect();
-      try {
-        return rpc.call();
-      } catch (ThriftIOException e) {
-        throw new IOException(e);
-      } catch (AlluxioTException e) {
-        throw Throwables.propagate(AlluxioException.fromThrift(e));
-      } catch (TException e) {
-        LOG.error(e.getMessage(), e);
-        disconnect();
-      }
-      if (!retryPolicy.attemptRetry()) {
-        break;
-      }
-    }
-    throw new IOException("Failed after " + retryPolicy.getRetryCount() + " retries.");
+  protected synchronized <V> V retryRPC(RpcCallable<V> rpc) throws AlluxioStatusException {
+    return retryRPCInternal(rpc, () -> null);
   }
 
   /**
-   * Similar to {@link #retryRPC(RpcCallable)} except that the RPC call may throw
-   * {@link AlluxioTException} and once it is thrown, it will be transformed into
-   * {@link AlluxioException} and be thrown.
+   * Tries to execute an RPC defined as a {@link RpcCallable}. Metrics will be recorded based on
+   * the provided rpc name.
+   *
+   * If a {@link UnavailableException} occurs, a reconnection will be tried through
+   * {@link #connect()} and the action will be re-executed.
    *
    * @param rpc the RPC call to be executed
+   * @param rpcName the human readable name of the RPC call
    * @param <V> type of return value of the RPC call
    * @return the return value of the RPC call
-   * @throws AlluxioException when {@link AlluxioTException} is thrown by the RPC call
-   * @throws IOException when retries exceeds {@link #RPC_MAX_NUM_RETRY} or {@link #close()} has
-   *         been called before calling this method or during the retry
    */
-  protected synchronized <V> V retryRPC(RpcCallableThrowsAlluxioTException<V> rpc)
-      throws AlluxioException, IOException {
-    RetryPolicy retryPolicy =
-        new ExponentialBackoffRetry(BASE_SLEEP_MS, MAX_SLEEP_MS, RPC_MAX_NUM_RETRY);
-    while (!mClosed) {
+  protected synchronized <V> V retryRPC(RpcCallable<V> rpc, String rpcName)
+      throws AlluxioStatusException {
+    try (Timer.Context ctx = MetricsSystem.timer(getQualifiedMetricName(rpcName)).time()) {
+      return retryRPCInternal(rpc, () -> {
+        MetricsSystem.counter(getQualifiedRetryMetricName(rpcName)).inc();
+        return null;
+      });
+    } catch (Exception e) {
+      MetricsSystem.counter(getQualifiedFailureMetricName(rpcName)).inc();
+      throw e;
+    }
+  }
+
+  private synchronized <V> V retryRPCInternal(RpcCallable<V> rpc, Supplier<Void> onRetry)
+      throws AlluxioStatusException {
+    RetryPolicy retryPolicy = mRetryPolicySupplier.get();
+    Exception ex = null;
+    while (retryPolicy.attempt()) {
+      if (mClosed) {
+        throw new FailedPreconditionException("Client is closed");
+      }
       connect();
       try {
         return rpc.call();
-      } catch (AlluxioTException e) {
-        throw AlluxioException.fromThrift(e);
-      } catch (ThriftIOException e) {
-        throw new IOException(e);
-      } catch (TException e) {
-        LOG.error(e.getMessage(), e);
-        disconnect();
+      } catch (StatusRuntimeException e) {
+        AlluxioStatusException se = AlluxioStatusException.fromStatusRuntimeException(e);
+        if (se.getStatusCode() == Status.Code.UNAVAILABLE
+            || se.getStatusCode() == Status.Code.CANCELLED
+            || se.getStatusCode() == Status.Code.UNAUTHENTICATED
+            || e.getCause() instanceof UnresolvedAddressException) {
+          ex = se;
+        } else {
+          throw se;
+        }
       }
-      if (!retryPolicy.attemptRetry()) {
-        break;
-      }
+      LOG.info("Rpc failed ({}): {}", retryPolicy.getAttemptCount(), ex.toString());
+      onRetry.get();
+      disconnect();
     }
-    throw new IOException("Failed after " + retryPolicy.getRetryCount() + " retries.");
+    throw new UnavailableException("Failed after " + retryPolicy.getAttemptCount()
+        + " attempts: " + ex.toString(), ex);
+  }
+
+  // TODO(calvin): General tag logic should be in getMetricName
+  private String getQualifiedMetricName(String metricName) {
+    try {
+      if (SecurityUtils.isAuthenticationEnabled(mContext.getConf())
+          && LoginUser.get(mContext.getConf()) != null) {
+        return Metric.getMetricNameWithTags(metricName, CommonMetrics.TAG_USER,
+            LoginUser.get(mContext.getConf()).getName());
+      } else {
+        return metricName;
+      }
+    } catch (IOException e) {
+      return metricName;
+    }
+  }
+
+  // TODO(calvin): This should not be in this class
+  private String getQualifiedRetryMetricName(String metricName) {
+    return getQualifiedMetricName(metricName + "Retries");
+  }
+
+  // TODO(calvin): This should not be in this class
+  private String getQualifiedFailureMetricName(String metricName) {
+    return getQualifiedMetricName(metricName + "Failures");
   }
 }

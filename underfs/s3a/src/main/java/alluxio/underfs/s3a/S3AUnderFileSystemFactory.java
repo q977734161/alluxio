@@ -13,7 +13,9 @@ package alluxio.underfs.s3a;
 
 import alluxio.AlluxioURI;
 import alluxio.Constants;
+import alluxio.conf.AlluxioConfiguration;
 import alluxio.underfs.UnderFileSystem;
+import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.UnderFileSystemFactory;
 
 import com.amazonaws.AmazonClientException;
@@ -35,11 +37,12 @@ public class S3AUnderFileSystemFactory implements UnderFileSystemFactory {
   public S3AUnderFileSystemFactory() {}
 
   @Override
-  public UnderFileSystem create(String path, Object unusedConf) {
-    Preconditions.checkNotNull(path);
+  public UnderFileSystem create(String path, UnderFileSystemConfiguration conf,
+      AlluxioConfiguration alluxioConf) {
+    Preconditions.checkNotNull(path, "path");
 
     try {
-      return S3AUnderFileSystem.createInstance(new AlluxioURI(path));
+      return S3AUnderFileSystem.createInstance(new AlluxioURI(path), conf, alluxioConf);
     } catch (AmazonClientException e) {
       throw Throwables.propagate(e);
     }

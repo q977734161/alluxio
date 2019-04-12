@@ -11,23 +11,22 @@
 
 package alluxio.worker.block.allocator;
 
-import alluxio.Configuration;
-import alluxio.ConfigurationTestUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
 
 import org.junit.Test;
 
 /**
  * Unit tests for {@link MaxFreeAllocator}.
  */
-public class MaxFreeAllocatorTest extends AllocatorTestBase {
+public final class MaxFreeAllocatorTest extends AllocatorTestBase {
 
   /**
    * Tests that blocks are allocated in the storage directory with the most available free space.
    */
   @Test
   public void allocateBlock() throws Exception {
-    Configuration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, MaxFreeAllocator.class.getName());
+    ServerConfiguration.set(PropertyKey.WORKER_ALLOCATOR_CLASS, MaxFreeAllocator.class.getName());
     mAllocator = Allocator.Factory.create(getManagerView());
     //
     // idx | tier1 | tier2 | tier3
@@ -78,6 +77,6 @@ public class MaxFreeAllocatorTest extends AllocatorTestBase {
     //  1               ├─── 3000
     //  2               └─── 3000
     //
-    ConfigurationTestUtils.resetConfiguration();
+    ServerConfiguration.reset();
   }
 }

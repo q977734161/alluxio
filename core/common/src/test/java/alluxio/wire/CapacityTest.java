@@ -11,16 +11,20 @@
 
 package alluxio.wire;
 
-import alluxio.CommonTestUtils;
+import static org.junit.Assert.assertEquals;
 
-import org.codehaus.jackson.map.ObjectMapper;
-import org.junit.Assert;
+import alluxio.test.util.CommonUtils;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Test;
 
 import java.util.Random;
 
 public class CapacityTest {
 
+  /**
+   * Test to convert between a Capacity type and a json type.
+   */
   @Test
   public void json() throws Exception {
     Capacity capacity = createRandom();
@@ -31,15 +35,26 @@ public class CapacityTest {
 
   @Test
   public void equals() {
-    CommonTestUtils.testEquals(AlluxioMasterInfo.class);
+    CommonUtils.testEquals(AlluxioMasterInfo.class);
   }
 
+  /**
+   * Checks if the two Capacity objects are equal.
+   *
+   * @param a the first Capacity object to be checked
+   * @param b the second Capacity object to be checked
+   */
   private void checkEquality(Capacity a, Capacity b) {
-    Assert.assertEquals(a.getTotal(), b.getTotal());
-    Assert.assertEquals(a.getUsed(), b.getUsed());
-    Assert.assertEquals(a, b);
+    assertEquals(a.getTotal(), b.getTotal());
+    assertEquals(a.getUsed(), b.getUsed());
+    assertEquals(a, b);
   }
 
+  /**
+   * Randomly creates a Capacity object.
+   *
+   * @return the created Capacity object
+   */
   protected static Capacity createRandom() {
     Capacity result = new Capacity();
     Random random = new Random();

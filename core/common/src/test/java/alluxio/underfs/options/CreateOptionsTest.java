@@ -11,15 +11,21 @@
 
 package alluxio.underfs.options;
 
-import alluxio.CommonTestUtils;
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.security.authentication.AuthType;
 import alluxio.security.authorization.Mode;
 import alluxio.security.group.provider.IdentityUserGroupsMapping;
 import alluxio.util.CommonUtils;
+import alluxio.util.ConfigurationUtils;
+import alluxio.util.ModeUtils;
 
-import org.junit.Assert;
+import com.google.common.testing.EqualsTester;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -29,18 +35,27 @@ import java.util.Random;
  * Tests for the {@link CreateOptions} class.
  */
 public final class CreateOptionsTest {
+
+  private InstancedConfiguration mConfiguration;
+
+  @Before
+  public void before() {
+    mConfiguration = new InstancedConfiguration(ConfigurationUtils.defaults());
+  }
+
   /**
    * Tests for default {@link CreateOptions}.
    */
   @Test
   public void defaults() throws IOException {
-    CreateOptions options = CreateOptions.defaults();
+    CreateOptions options = CreateOptions.defaults(mConfiguration);
 
-    Assert.assertFalse(options.getCreateParent());
-    Assert.assertTrue(options.isEnsureAtomic());
-    Assert.assertEquals("", options.getOwner());
-    Assert.assertEquals("", options.getGroup());
-    Assert.assertEquals(Mode.defaults().applyFileUMask(), options.getMode());
+    assertFalse(options.getCreateParent());
+    assertFalse(options.isEnsureAtomic());
+    assertNull(options.getOwner());
+    assertNull(options.getGroup());
+    String umask = mConfiguration.get(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_UMASK);
+    assertEquals(ModeUtils.applyFileUMask(Mode.defaults(), umask), options.getMode());
   }
 
   /**
@@ -49,19 +64,20 @@ public final class CreateOptionsTest {
    */
   @Test
   public void securityEnabled() throws IOException {
-    Configuration.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.SIMPLE.getAuthName());
-    Configuration.set(PropertyKey.SECURITY_LOGIN_USERNAME, "foo");
+    mConfiguration.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.SIMPLE.getAuthName());
+    mConfiguration.set(PropertyKey.SECURITY_LOGIN_USERNAME, "foo");
     // Use IdentityUserGroupMapping to map user "foo" to group "foo".
-    Configuration.set(PropertyKey.SECURITY_GROUP_MAPPING_CLASS,
+    mConfiguration.set(PropertyKey.SECURITY_GROUP_MAPPING_CLASS,
         IdentityUserGroupsMapping.class.getName());
 
-    CreateOptions options = CreateOptions.defaults();
+    CreateOptions options = CreateOptions.defaults(mConfiguration);
 
-    Assert.assertFalse(options.getCreateParent());
-    Assert.assertTrue(options.isEnsureAtomic());
-    Assert.assertEquals("", options.getOwner());
-    Assert.assertEquals("", options.getGroup());
-    Assert.assertEquals(Mode.defaults().applyFileUMask(), options.getMode());
+    assertFalse(options.getCreateParent());
+    assertFalse(options.isEnsureAtomic());
+    assertNull(options.getOwner());
+    assertNull(options.getGroup());
+    String umask = mConfiguration.get(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_UMASK);
+    assertEquals(ModeUtils.applyFileUMask(Mode.defaults(), umask), options.getMode());
   }
 
   /**
@@ -76,22 +92,26 @@ public final class CreateOptionsTest {
     String group = CommonUtils.randomAlphaNumString(10);
     Mode mode = new Mode((short) random.nextInt());
 
-    CreateOptions options = CreateOptions.defaults();
+    CreateOptions options = CreateOptions.defaults(mConfiguration);
     options.setCreateParent(createParent);
     options.setEnsureAtomic(ensureAtomic);
     options.setOwner(owner);
     options.setGroup(group);
     options.setMode(mode);
 
-    Assert.assertEquals(createParent, options.getCreateParent());
-    Assert.assertEquals(ensureAtomic, options.isEnsureAtomic());
-    Assert.assertEquals(owner, options.getOwner());
-    Assert.assertEquals(group, options.getGroup());
-    Assert.assertEquals(mode, options.getMode());
+    assertEquals(createParent, options.getCreateParent());
+    assertEquals(ensureAtomic, options.isEnsureAtomic());
+    assertEquals(owner, options.getOwner());
+    assertEquals(group, options.getGroup());
+    assertEquals(mode, options.getMode());
   }
 
   @Test
   public void equalsTest() throws Exception {
-    CommonTestUtils.testEquals(CreateOptions.class);
+    new EqualsTester()
+        .addEqualityGroup(
+            CreateOptions.defaults(mConfiguration),
+            CreateOptions.defaults(mConfiguration))
+        .testEquals();
   }
 }

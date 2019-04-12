@@ -11,14 +11,18 @@
 
 package alluxio.wire;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 
 import java.util.List;
 import java.util.Map;
 
+import javax.annotation.concurrent.NotThreadSafe;
+
 /**
  * Alluxio master information.
  */
+@NotThreadSafe
 public class AlluxioMasterInfo {
   private Capacity mCapacity;
   private Map<String, String> mConfiguration;
@@ -281,7 +285,7 @@ public class AlluxioMasterInfo {
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this)
+    return MoreObjects.toStringHelper(this)
         .add("capacity", mCapacity)
         .add("configuration", mConfiguration)
         .add("lost workers", mLostWorkers)

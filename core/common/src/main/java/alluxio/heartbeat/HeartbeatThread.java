@@ -11,7 +11,7 @@
 
 package alluxio.heartbeat;
 
-import alluxio.Constants;
+import alluxio.conf.AlluxioConfiguration;
 import alluxio.security.LoginUser;
 import alluxio.security.authentication.AuthenticatedClientUser;
 import alluxio.util.CommonUtils;
@@ -31,11 +31,12 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe
 public final class HeartbeatThread implements Runnable {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(HeartbeatThread.class);
 
   private final String mThreadName;
   private final HeartbeatExecutor mExecutor;
   private HeartbeatTimer mTimer;
+  private AlluxioConfiguration mConfiguration;
 
   /**
    * Creates a {@link Runnable} to execute heartbeats for the given {@link HeartbeatExecutor}.
@@ -46,27 +47,24 @@ public final class HeartbeatThread implements Runnable {
    * @param executor identifies the heartbeat thread executor; an instance of a class that
    *        implements the HeartbeatExecutor interface
    * @param intervalMs Sleep time between different heartbeat
+   * @param conf Alluxio configuration
    */
-  public HeartbeatThread(String threadName, HeartbeatExecutor executor, long intervalMs) {
+  public HeartbeatThread(String threadName, HeartbeatExecutor executor, long intervalMs,
+      AlluxioConfiguration conf) {
     mThreadName = threadName;
     mExecutor = Preconditions.checkNotNull(executor, "executor");
     Class<? extends HeartbeatTimer> timerClass = HeartbeatContext.getTimerClass(threadName);
-    try {
-      mTimer =
-          CommonUtils.createNewClassInstance(timerClass, new Class[] {String.class, long.class},
-              new Object[] {threadName, intervalMs});
-    } catch (Exception e) {
-      String msg = "timer class could not be instantiated";
-      LOG.error("{} : {} , {}", msg, threadName, e);
-      mTimer = new SleepingTimer(threadName, intervalMs);
-    }
+    mTimer = CommonUtils.createNewClassInstance(timerClass, new Class[] {String.class, long.class},
+        new Object[] {threadName, intervalMs});
+    mConfiguration = conf;
   }
 
   @Override
   public void run() {
     try {
-      if (SecurityUtils.isSecurityEnabled() && AuthenticatedClientUser.get() == null) {
-        AuthenticatedClientUser.set(LoginUser.get().getName());
+      if (SecurityUtils.isSecurityEnabled(mConfiguration)
+          && AuthenticatedClientUser.get(mConfiguration) == null) {
+        AuthenticatedClientUser.set(LoginUser.get(mConfiguration).getName());
       }
     } catch (IOException e) {
       LOG.error("Failed to set AuthenticatedClientUser in HeartbeatThread.");
@@ -82,7 +80,7 @@ public final class HeartbeatThread implements Runnable {
         mExecutor.heartbeat();
       }
     } catch (InterruptedException e) {
-      LOG.info("Hearbeat is interrupted.");
+      // Allow thread to exit.
     } catch (Exception e) {
       LOG.error("Uncaught exception in heartbeat executor, Heartbeat Thread shutting down", e);
     } finally {

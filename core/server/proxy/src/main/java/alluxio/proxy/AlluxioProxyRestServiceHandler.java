@@ -11,8 +11,8 @@
 
 package alluxio.proxy;
 
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.ConfigurationValueOptions;
 import alluxio.RestUtils;
 import alluxio.RuntimeConstants;
 import alluxio.web.ProxyWebServer;
@@ -21,8 +21,6 @@ import alluxio.wire.AlluxioProxyInfo;
 import com.qmino.miredot.annotations.ReturnType;
 
 import java.util.Map;
-import java.util.Set;
-import java.util.SortedMap;
 import java.util.TreeMap;
 
 import javax.annotation.concurrent.NotThreadSafe;
@@ -50,7 +48,7 @@ public final class AlluxioProxyRestServiceHandler {
   // queries
   public static final String QUERY_RAW_CONFIGURATION = "raw_configuration";
 
-  private final AlluxioProxyService mProxy;
+  private final ProxyProcess mProxyProcess;
 
   /**
    * Constructs a new {@link AlluxioProxyRestServiceHandler}.
@@ -59,7 +57,7 @@ public final class AlluxioProxyRestServiceHandler {
    */
   public AlluxioProxyRestServiceHandler(@Context ServletContext context) {
     // Poor man's dependency injection through the Jersey application scope.
-    mProxy = (AlluxioProxyService) context
+    mProxyProcess = (ProxyProcess) context
         .getAttribute(ProxyWebServer.ALLUXIO_PROXY_SERVLET_RESOURCE_KEY);
   }
 
@@ -75,37 +73,23 @@ public final class AlluxioProxyRestServiceHandler {
   @ReturnType("alluxio.wire.AlluxioProxyInfo")
   public Response getInfo(@QueryParam(QUERY_RAW_CONFIGURATION) final Boolean rawConfiguration) {
     // TODO(jiri): Add a mechanism for retrieving only a subset of the fields.
-    return RestUtils.call(new RestUtils.RestCallable<AlluxioProxyInfo>() {
-      @Override
-      public AlluxioProxyInfo call() throws Exception {
-        boolean rawConfig = false;
-        if (rawConfiguration != null) {
-          rawConfig = rawConfiguration;
-        }
-        AlluxioProxyInfo result =
-            new AlluxioProxyInfo()
-                .setConfiguration(getConfigurationInternal(rawConfig))
-                .setStartTimeMs(mProxy.getStartTimeMs())
-                .setUptimeMs(mProxy.getUptimeMs())
-                .setVersion(RuntimeConstants.VERSION);
-        return result;
+    return RestUtils.call(() -> {
+      boolean rawConfig = false;
+      if (rawConfiguration != null) {
+        rawConfig = rawConfiguration;
       }
-    });
+      AlluxioProxyInfo result =
+          new AlluxioProxyInfo()
+              .setConfiguration(getConfigurationInternal(rawConfig))
+              .setStartTimeMs(mProxyProcess.getStartTimeMs())
+              .setUptimeMs(mProxyProcess.getUptimeMs())
+              .setVersion(RuntimeConstants.VERSION);
+      return result;
+    }, ServerConfiguration.global());
   }
 
   private Map<String, String> getConfigurationInternal(boolean raw) {
-    Set<Map.Entry<String, String>> properties = Configuration.toMap().entrySet();
-    SortedMap<String, String> configuration = new TreeMap<>();
-    for (Map.Entry<String, String> entry : properties) {
-      String key = entry.getKey();
-      if (PropertyKey.isValid(key)) {
-        if (raw) {
-          configuration.put(key, entry.getValue());
-        } else {
-          configuration.put(key, Configuration.get(PropertyKey.fromString(key)));
-        }
-      }
-    }
-    return configuration;
+    return new TreeMap<>(ServerConfiguration
+        .toMap(ConfigurationValueOptions.defaults().useDisplayValue(true).useRawValue(raw)));
   }
 }

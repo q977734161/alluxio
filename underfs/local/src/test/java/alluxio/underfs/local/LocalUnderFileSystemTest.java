@@ -11,9 +11,19 @@
 
 package alluxio.underfs.local;
 
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
+
+import alluxio.AlluxioURI;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.underfs.UfsMode;
 import alluxio.underfs.UnderFileSystem;
 import alluxio.underfs.options.DeleteOptions;
 import alluxio.underfs.options.MkdirsOptions;
+import alluxio.util.ConfigurationUtils;
 import alluxio.util.io.PathUtils;
 import alluxio.util.network.NetworkAddressUtils;
 
@@ -27,7 +37,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Hashtable;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Unit tests for the {@link LocalUnderFileSystem}.
@@ -35,6 +47,8 @@ import java.util.List;
 public class LocalUnderFileSystemTest {
   private String mLocalUfsRoot;
   private UnderFileSystem mLocalUfs;
+  private static AlluxioConfiguration sConf =
+      new InstancedConfiguration(ConfigurationUtils.defaults());
 
   @Rule
   public TemporaryFolder mTemporaryFolder = new TemporaryFolder();
@@ -42,7 +56,7 @@ public class LocalUnderFileSystemTest {
   @Before
   public void before() throws IOException {
     mLocalUfsRoot = mTemporaryFolder.getRoot().getAbsolutePath();
-    mLocalUfs = UnderFileSystem.Factory.get(mLocalUfsRoot);
+    mLocalUfs = UnderFileSystem.Factory.create(mLocalUfsRoot, sConf);
   }
 
   @Test
@@ -50,26 +64,23 @@ public class LocalUnderFileSystemTest {
     String filepath = PathUtils.concatPath(mLocalUfsRoot, getUniqueFileName());
     mLocalUfs.create(filepath).close();
 
-    Assert.assertTrue(mLocalUfs.isFile(filepath));
+    assertTrue(mLocalUfs.isFile(filepath));
 
     mLocalUfs.deleteFile(filepath);
 
-    Assert.assertFalse(mLocalUfs.isFile(filepath));
+    assertFalse(mLocalUfs.isFile(filepath));
   }
 
   @Test
   public void create() throws IOException {
     String filepath = PathUtils.concatPath(mLocalUfsRoot, getUniqueFileName());
     OutputStream os = mLocalUfs.create(filepath);
-
-    Assert.assertFalse(mLocalUfs.isFile(filepath));
-
     os.close();
 
-    Assert.assertTrue(mLocalUfs.isFile(filepath));
+    assertTrue(mLocalUfs.isFile(filepath));
 
     File file = new File(filepath);
-    Assert.assertTrue(file.exists());
+    assertTrue(file.exists());
   }
 
   @Test
@@ -78,10 +89,10 @@ public class LocalUnderFileSystemTest {
     mLocalUfs.create(filepath).close();
     mLocalUfs.deleteFile(filepath);
 
-    Assert.assertFalse(mLocalUfs.isFile(filepath));
+    assertFalse(mLocalUfs.isFile(filepath));
 
     File file = new File(filepath);
-    Assert.assertFalse(file.exists());
+    assertFalse(file.exists());
   }
 
   @Test
@@ -92,10 +103,10 @@ public class LocalUnderFileSystemTest {
     mLocalUfs.create(filepath).close();
     mLocalUfs.deleteDirectory(dirpath, DeleteOptions.defaults().setRecursive(true));
 
-    Assert.assertFalse(mLocalUfs.isDirectory(dirpath));
+    assertFalse(mLocalUfs.isDirectory(dirpath));
 
     File file = new File(filepath);
-    Assert.assertFalse(file.exists());
+    assertFalse(file.exists());
   }
 
   @Test
@@ -106,10 +117,10 @@ public class LocalUnderFileSystemTest {
     mLocalUfs.create(filepath).close();
     mLocalUfs.deleteDirectory(dirpath, DeleteOptions.defaults().setRecursive(false));
 
-    Assert.assertTrue(mLocalUfs.isDirectory(dirpath));
+    assertTrue(mLocalUfs.isDirectory(dirpath));
 
     File file = new File(filepath);
-    Assert.assertTrue(file.exists());
+    assertTrue(file.exists());
   }
 
   @Test
@@ -118,22 +129,22 @@ public class LocalUnderFileSystemTest {
     String dirpath = PathUtils.concatPath(parentPath, getUniqueFileName());
     mLocalUfs.mkdirs(dirpath);
 
-    Assert.assertTrue(mLocalUfs.isDirectory(dirpath));
+    assertTrue(mLocalUfs.isDirectory(dirpath));
 
     File file = new File(dirpath);
-    Assert.assertTrue(file.exists());
+    assertTrue(file.exists());
   }
 
   @Test
   public void mkdirsWithCreateParentEqualToFalse() throws IOException {
     String parentPath = PathUtils.concatPath(mLocalUfsRoot, getUniqueFileName());
     String dirpath = PathUtils.concatPath(parentPath, getUniqueFileName());
-    mLocalUfs.mkdirs(dirpath, MkdirsOptions.defaults().setCreateParent(false));
+    mLocalUfs.mkdirs(dirpath, MkdirsOptions.defaults(sConf).setCreateParent(false));
 
-    Assert.assertFalse(mLocalUfs.isDirectory(dirpath));
+    assertFalse(mLocalUfs.isDirectory(dirpath));
 
     File file = new File(dirpath);
-    Assert.assertFalse(file.exists());
+    assertFalse(file.exists());
   }
 
   @Test
@@ -163,19 +174,33 @@ public class LocalUnderFileSystemTest {
     os.close();
 
     List<String> fileLocations = mLocalUfs.getFileLocations(filepath);
-    Assert.assertEquals(1, fileLocations.size());
-    Assert.assertEquals(NetworkAddressUtils.getLocalHostName(), fileLocations.get(0));
+    assertEquals(1, fileLocations.size());
+    assertEquals(NetworkAddressUtils.getLocalHostName(
+        (int) sConf.getMs(PropertyKey.NETWORK_HOST_RESOLUTION_TIMEOUT_MS)),
+        fileLocations.get(0));
+  }
+
+  @Test
+  public void getOperationMode() throws IOException {
+    Map<String, UfsMode> physicalUfsState = new Hashtable<>();
+    // Check default
+    Assert.assertEquals(UfsMode.READ_WRITE,
+        mLocalUfs.getOperationMode(physicalUfsState));
+    // Check NO_ACCESS mode
+    physicalUfsState.put(AlluxioURI.SEPARATOR, UfsMode.NO_ACCESS);
+    Assert.assertEquals(UfsMode.NO_ACCESS,
+        mLocalUfs.getOperationMode(physicalUfsState));
   }
 
   @Test
   public void isFile() throws IOException {
     String dirpath = PathUtils.concatPath(mLocalUfsRoot, getUniqueFileName());
     mLocalUfs.mkdirs(dirpath);
-    Assert.assertFalse(mLocalUfs.isFile(dirpath));
+    assertFalse(mLocalUfs.isFile(dirpath));
 
     String filepath = PathUtils.concatPath(mLocalUfsRoot, getUniqueFileName());
     mLocalUfs.create(filepath).close();
-    Assert.assertTrue(mLocalUfs.isFile(filepath));
+    assertTrue(mLocalUfs.isFile(filepath));
   }
 
   @Test

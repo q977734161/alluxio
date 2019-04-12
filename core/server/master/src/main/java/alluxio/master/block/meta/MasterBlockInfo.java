@@ -13,7 +13,8 @@ package alluxio.master.block.meta;
 
 import alluxio.Constants;
 
-import com.google.common.base.Objects;
+import com.google.common.base.MoreObjects;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,7 +33,7 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe
 public final class MasterBlockInfo {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(MasterBlockInfo.class);
 
   /** The id of the block. */
   private final long mBlockId;
@@ -148,6 +149,8 @@ public final class MasterBlockInfo {
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this).add("blockId", mBlockId).add("length", mLength).toString();
+    return MoreObjects.toStringHelper(this)
+        .add("blockId", mBlockId)
+        .add("length", mLength).toString();
   }
 }

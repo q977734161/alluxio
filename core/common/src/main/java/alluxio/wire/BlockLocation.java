@@ -13,6 +13,7 @@ package alluxio.wire;
 
 import alluxio.annotation.PublicApi;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 
@@ -36,17 +37,6 @@ public final class BlockLocation implements Serializable {
    * Creates a new instance of {@link BlockLocation}.
    */
   public BlockLocation() {}
-
-  /**
-   * Creates a new instance of {@link BlockLocation} from a thrift representation.
-   *
-   * @param blockLocation the thrift representation of a block location
-   */
-  protected BlockLocation(alluxio.thrift.BlockLocation blockLocation) {
-    mWorkerId = blockLocation.getWorkerId();
-    mWorkerAddress = new WorkerNetAddress(blockLocation.getWorkerAddress());
-    mTierAlias = blockLocation.getTierAlias();
-  }
 
   /**
    * @return the worker id
@@ -83,7 +73,7 @@ public final class BlockLocation implements Serializable {
    * @return the block location
    */
   public BlockLocation setWorkerAddress(WorkerNetAddress workerAddress) {
-    Preconditions.checkNotNull(workerAddress);
+    Preconditions.checkNotNull(workerAddress, "workerAddress");
     mWorkerAddress = workerAddress;
     return this;
   }
@@ -93,16 +83,9 @@ public final class BlockLocation implements Serializable {
    * @return the block location
    */
   public BlockLocation setTierAlias(String tierAlias) {
-    Preconditions.checkNotNull(tierAlias);
+    Preconditions.checkNotNull(tierAlias, "tierAlias");
     mTierAlias = tierAlias;
     return this;
-  }
-
-  /**
-   * @return thrift representation of the block location
-   */
-  protected alluxio.thrift.BlockLocation toThrift() {
-    return new alluxio.thrift.BlockLocation(mWorkerId, mWorkerAddress.toThrift(), mTierAlias);
   }
 
   @Override
@@ -125,7 +108,9 @@ public final class BlockLocation implements Serializable {
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this).add("workerId", mWorkerId).add("address", mWorkerAddress)
+    return MoreObjects.toStringHelper(this)
+        .add("workerId", mWorkerId)
+        .add("address", mWorkerAddress)
         .add("tierAlias", mTierAlias).toString();
   }
 }

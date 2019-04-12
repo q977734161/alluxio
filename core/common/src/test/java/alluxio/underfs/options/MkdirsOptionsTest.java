@@ -11,15 +11,21 @@
 
 package alluxio.underfs.options;
 
-import alluxio.CommonTestUtils;
-import alluxio.Configuration;
-import alluxio.PropertyKey;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.security.authentication.AuthType;
 import alluxio.security.authorization.Mode;
 import alluxio.security.group.provider.IdentityUserGroupsMapping;
 import alluxio.util.CommonUtils;
+import alluxio.util.ConfigurationUtils;
+import alluxio.util.ModeUtils;
 
-import org.junit.Assert;
+import com.google.common.testing.EqualsTester;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -29,19 +35,28 @@ import java.util.Random;
  * Tests for the {@link MkdirsOptions} class.
  */
 public final class MkdirsOptionsTest {
+
+  private InstancedConfiguration mConfiguration;
+
+  @Before
+  public void before() {
+    mConfiguration = new InstancedConfiguration(ConfigurationUtils.defaults());
+  }
+
   /**
    * Tests for default {@link MkdirsOptions}.
    */
   @Test
   public void defaults() throws IOException {
-    MkdirsOptions options = MkdirsOptions.defaults();
+    MkdirsOptions options = MkdirsOptions.defaults(mConfiguration);
 
     // Verify the default createParent is true.
-    Assert.assertTrue(options.getCreateParent());
+    assertTrue(options.getCreateParent());
     // Verify that the owner and group are not set.
-    Assert.assertEquals("", options.getOwner());
-    Assert.assertEquals("", options.getGroup());
-    Assert.assertEquals(Mode.defaults().applyDirectoryUMask(), options.getMode());
+    assertNull(options.getOwner());
+    assertNull(options.getGroup());
+    String umask = mConfiguration.get(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_UMASK);
+    assertEquals(ModeUtils.applyDirectoryUMask(Mode.defaults(), umask), options.getMode());
   }
 
   /**
@@ -50,20 +65,22 @@ public final class MkdirsOptionsTest {
    */
   @Test
   public void securityEnabled() throws IOException {
-    Configuration.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.SIMPLE.getAuthName());
-    Configuration.set(PropertyKey.SECURITY_LOGIN_USERNAME, "foo");
+    InstancedConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
+    conf.set(PropertyKey.SECURITY_AUTHENTICATION_TYPE, AuthType.SIMPLE.getAuthName());
+    conf.set(PropertyKey.SECURITY_LOGIN_USERNAME, "foo");
     // Use IdentityUserGroupMapping to map user "foo" to group "foo".
-    Configuration.set(PropertyKey.SECURITY_GROUP_MAPPING_CLASS,
+    conf.set(PropertyKey.SECURITY_GROUP_MAPPING_CLASS,
         IdentityUserGroupsMapping.class.getName());
 
-    MkdirsOptions options = MkdirsOptions.defaults();
+    MkdirsOptions options = MkdirsOptions.defaults(mConfiguration);
 
     // Verify the default createParent is true.
-    Assert.assertTrue(options.getCreateParent());
+    assertTrue(options.getCreateParent());
     // Verify that the owner and group are not set.
-    Assert.assertEquals("", options.getOwner());
-    Assert.assertEquals("", options.getGroup());
-    Assert.assertEquals(Mode.defaults().applyDirectoryUMask(), options.getMode());
+    assertNull(options.getOwner());
+    assertNull(options.getGroup());
+    String umask = mConfiguration.get(PropertyKey.SECURITY_AUTHORIZATION_PERMISSION_UMASK);
+    assertEquals(ModeUtils.applyDirectoryUMask(Mode.defaults(), umask), options.getMode());
   }
 
   /**
@@ -77,20 +94,24 @@ public final class MkdirsOptionsTest {
     String group = CommonUtils.randomAlphaNumString(10);
     Mode mode = new Mode((short) random.nextInt());
 
-    MkdirsOptions options = MkdirsOptions.defaults();
+    MkdirsOptions options = MkdirsOptions.defaults(mConfiguration);
     options.setCreateParent(createParent);
     options.setOwner(owner);
     options.setGroup(group);
     options.setMode(mode);
 
-    Assert.assertEquals(createParent, options.getCreateParent());
-    Assert.assertEquals(owner, options.getOwner());
-    Assert.assertEquals(group, options.getGroup());
-    Assert.assertEquals(mode, options.getMode());
+    assertEquals(createParent, options.getCreateParent());
+    assertEquals(owner, options.getOwner());
+    assertEquals(group, options.getGroup());
+    assertEquals(mode, options.getMode());
   }
 
   @Test
   public void equalsTest() throws Exception {
-    CommonTestUtils.testEquals(MkdirsOptions.class);
+    new EqualsTester()
+        .addEqualityGroup(
+            MkdirsOptions.defaults(mConfiguration),
+            MkdirsOptions.defaults(mConfiguration))
+        .testEquals();
   }
 }

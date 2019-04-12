@@ -11,8 +11,10 @@
 
 package alluxio.underfs.swift;
 
+import alluxio.ConfigurationTestUtils;
+import alluxio.conf.AlluxioConfiguration;
 import alluxio.underfs.UnderFileSystemFactory;
-import alluxio.underfs.UnderFileSystemRegistry;
+import alluxio.underfs.UnderFileSystemFactoryRegistry;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -27,11 +29,15 @@ public class SwiftUnderFileSystemFactoryTest {
    */
   @Test
   public void factory() {
-    UnderFileSystemFactory factory = UnderFileSystemRegistry.find("swift://localhost/test/path");
-    UnderFileSystemFactory factory2 = UnderFileSystemRegistry.find("file://localhost/test/path");
+    AlluxioConfiguration conf = ConfigurationTestUtils.defaults();
+    UnderFileSystemFactory factory =
+        UnderFileSystemFactoryRegistry.find("swift://localhost/test/path", conf);
+    UnderFileSystemFactory factory2 =
+        UnderFileSystemFactoryRegistry.find("file://localhost/test/path", conf);
 
-    Assert.assertNotNull("A UnderFileSystemFactory should exist for swift paths when using this "
-        + "module", factory);
+    Assert.assertNotNull(
+        "A UnderFileSystemFactory should exist for swift paths when using this " + "module",
+        factory);
     Assert.assertNull("A UnderFileSystemFactory should not exist for non supported paths when "
         + "using this module", factory2);
   }

@@ -13,9 +13,9 @@ package alluxio.wire;
 
 import alluxio.annotation.PublicApi;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
-import com.google.common.net.HostAndPort;
 
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -39,24 +39,6 @@ public final class FileBlockInfo implements Serializable {
    * Creates a new instance of {@link FileBlockInfo}.
    */
   public FileBlockInfo() {}
-
-  /**
-   * Creates a new instance of {@link FileBlockInfo} from a thrift representation.
-   *
-   * @param fileBlockInfo the thrift representation of a file block information
-   */
-  protected FileBlockInfo(alluxio.thrift.FileBlockInfo fileBlockInfo) {
-    mBlockInfo = new BlockInfo(fileBlockInfo.getBlockInfo());
-    mOffset = fileBlockInfo.getOffset();
-    if (fileBlockInfo.getUfsStringLocationsSize() != 0) {
-      mUfsLocations = new ArrayList<>(fileBlockInfo.getUfsStringLocations());
-    } else if (fileBlockInfo.getUfsLocationsSize() != 0) {
-      for (alluxio.thrift.WorkerNetAddress address : fileBlockInfo.getUfsLocations()) {
-        mUfsLocations
-            .add(HostAndPort.fromParts(address.getHost(), address.getDataPort()).toString());
-      }
-    }
-  }
 
   /**
    * @return the block info
@@ -84,7 +66,7 @@ public final class FileBlockInfo implements Serializable {
    * @return the file block information
    */
   public FileBlockInfo setBlockInfo(BlockInfo blockInfo) {
-    Preconditions.checkNotNull(blockInfo);
+    Preconditions.checkNotNull(blockInfo, "blockInfo");
     mBlockInfo = blockInfo;
     return this;
   }
@@ -103,23 +85,9 @@ public final class FileBlockInfo implements Serializable {
    * @return the file block information
    */
   public FileBlockInfo setUfsLocations(List<String> ufsLocations) {
-    Preconditions.checkNotNull(ufsLocations);
+    Preconditions.checkNotNull(ufsLocations, "ufsLocations");
     mUfsLocations = new ArrayList<>(ufsLocations);
     return this;
-  }
-
-  /**
-   * @return thrift representation of the file block information
-   */
-  protected alluxio.thrift.FileBlockInfo toThrift() {
-    List<alluxio.thrift.WorkerNetAddress> ufsLocations = new ArrayList<>();
-    for (String ufsLocation : mUfsLocations) {
-      HostAndPort address = HostAndPort.fromString(ufsLocation);
-      ufsLocations.add(new alluxio.thrift.WorkerNetAddress().setHost(address.getHostText())
-          .setDataPort(address.getPortOrDefault(-1)));
-    }
-    return new alluxio.thrift.FileBlockInfo(mBlockInfo.toThrift(), mOffset, ufsLocations,
-        mUfsLocations);
   }
 
   @Override
@@ -142,7 +110,7 @@ public final class FileBlockInfo implements Serializable {
 
   @Override
   public String toString() {
-    return Objects.toStringHelper(this).add("blockInfo", mBlockInfo).add("offset", mOffset)
+    return MoreObjects.toStringHelper(this).add("blockInfo", mBlockInfo).add("offset", mOffset)
         .add("ufsLocations", mUfsLocations).toString();
   }
 }

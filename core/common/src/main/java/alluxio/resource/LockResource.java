@@ -11,6 +11,9 @@
 
 package alluxio.resource;
 
+import com.google.common.annotations.VisibleForTesting;
+
+import java.io.Closeable;
 import java.util.concurrent.locks.Lock;
 
 /**
@@ -22,7 +25,8 @@ import java.util.concurrent.locks.Lock;
  *   }
  * </pre>
  */
-public class LockResource implements AutoCloseable {
+// extends Closeable instead of AutoCloseable to enable usage with Guava's Closer.
+public class LockResource implements Closeable {
   private final Lock mLock;
 
   /**
@@ -31,8 +35,31 @@ public class LockResource implements AutoCloseable {
    * @param lock the lock to acquire
    */
   public LockResource(Lock lock) {
+    this(lock, true);
+  }
+
+  /**
+   * Creates a new instance of {@link LockResource} using the given lock.
+   *
+   * @param lock the lock to acquire
+   * @param acquireLock whether to lock the lock
+   */
+  public LockResource(Lock lock, boolean acquireLock) {
     mLock = lock;
-    mLock.lock();
+    if (acquireLock) {
+      mLock.lock();
+    }
+  }
+
+  /**
+   * Returns true if the other lockresource contains the same lock.
+   *
+   * @param other other LockResource
+   * @return true if the other lockResource has the same lock
+   */
+  @VisibleForTesting
+  public boolean hasSameLock(LockResource other) {
+    return mLock == other.mLock;
   }
 
   /**

@@ -13,48 +13,50 @@ package alluxio.worker.block;
 
 import alluxio.AbstractMasterClient;
 import alluxio.Constants;
-import alluxio.exception.AlluxioException;
-import alluxio.exception.ConnectionFailedException;
-import alluxio.thrift.AlluxioService;
-import alluxio.thrift.AlluxioTException;
-import alluxio.thrift.BlockMasterWorkerService;
-import alluxio.thrift.Command;
+import alluxio.grpc.BlockHeartbeatPOptions;
+import alluxio.grpc.BlockHeartbeatPRequest;
+import alluxio.grpc.BlockMasterWorkerServiceGrpc;
+import alluxio.grpc.Command;
+import alluxio.grpc.CommitBlockInUfsPRequest;
+import alluxio.grpc.CommitBlockPRequest;
+import alluxio.grpc.ConfigProperty;
+import alluxio.grpc.GetWorkerIdPRequest;
+import alluxio.grpc.Metric;
+import alluxio.grpc.RegisterWorkerPOptions;
+import alluxio.grpc.RegisterWorkerPRequest;
+import alluxio.grpc.ServiceType;
+import alluxio.grpc.TierList;
+import alluxio.master.MasterClientContext;
+import alluxio.grpc.GrpcUtils;
 import alluxio.wire.WorkerNetAddress;
 
-import org.apache.thrift.TException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
-import java.net.InetSocketAddress;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
- * A wrapper for the thrift client to interact with the block master, used by alluxio worker.
+ * A wrapper for the gRPC client to interact with the block master, used by alluxio worker.
  * <p/>
- * Since thrift clients are not thread safe, this class is a wrapper to provide thread safety, and
- * to provide retries.
  */
 @ThreadSafe
 public final class BlockMasterClient extends AbstractMasterClient {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
-  private BlockMasterWorkerService.Client mClient = null;
+  private BlockMasterWorkerServiceGrpc.BlockMasterWorkerServiceBlockingStub mClient = null;
 
   /**
    * Creates a new instance of {@link BlockMasterClient} for the worker.
    *
-   * @param masterAddress the master address
+   * @param conf master client configuration
    */
-  public BlockMasterClient(InetSocketAddress masterAddress) {
-    super(null, masterAddress);
+  public BlockMasterClient(MasterClientContext conf) {
+    super(conf);
   }
 
   @Override
-  protected AlluxioService.Client getClient() {
-    return mClient;
+  protected ServiceType getRemoteServiceType() {
+    return ServiceType.BLOCK_MASTER_WORKER_SERVICE;
   }
 
   @Override
@@ -69,7 +71,7 @@ public final class BlockMasterClient extends AbstractMasterClient {
 
   @Override
   protected void afterConnect() throws IOException {
-    mClient = new BlockMasterWorkerService.Client(mProtocol);
+    mClient = BlockMasterWorkerServiceGrpc.newBlockingStub(mChannel);
   }
 
   /**
@@ -80,19 +82,31 @@ public final class BlockMasterClient extends AbstractMasterClient {
    * @param tierAlias the alias of the tier the block is being committed to
    * @param blockId the block id being committed
    * @param length the length of the block being committed
-   * @throws AlluxioTException if it fails to commit the block
-   * @throws ConnectionFailedException if network connection failed
-   * @throws IOException if an I/O error occurs
    */
-  public synchronized void commitBlock(final long workerId, final long usedBytesOnTier,
-      final String tierAlias, final long blockId, final long length)
-          throws AlluxioTException, IOException, ConnectionFailedException {
-    retryRPC(new RpcCallable<Void>() {
-      @Override
-      public Void call() throws TException {
-        mClient.commitBlock(workerId, usedBytesOnTier, tierAlias, blockId, length);
-        return null;
-      }
+  public void commitBlock(final long workerId, final long usedBytesOnTier,
+      final String tierAlias, final long blockId, final long length) throws IOException {
+    retryRPC((RpcCallable<Void>) () -> {
+      CommitBlockPRequest request =
+          CommitBlockPRequest.newBuilder().setWorkerId(workerId).setUsedBytesOnTier(usedBytesOnTier)
+              .setTierAlias(tierAlias).setBlockId(blockId).setLength(length).build();
+      mClient.commitBlock(request);
+      return null;
+    });
+  }
+
+  /**
+   * Commits a block in Ufs.
+   *
+   * @param blockId the block id being committed
+   * @param length the length of the block being committed
+   */
+  public void commitBlockInUfs(final long blockId, final long length)
+      throws IOException {
+    retryRPC((RpcCallable<Void>) () -> {
+      CommitBlockInUfsPRequest request =
+          CommitBlockInUfsPRequest.newBuilder().setBlockId(blockId).setLength(length).build();
+      mClient.commitBlockInUfs(request);
+      return null;
     });
   }
 
@@ -101,17 +115,12 @@ public final class BlockMasterClient extends AbstractMasterClient {
    *
    * @param address the net address to get a worker id for
    * @return a worker id
-   * @throws ConnectionFailedException if network connection failed
-   * @throws IOException if an I/O error occurs
    */
-  public synchronized long getId(final WorkerNetAddress address)
-      throws IOException, ConnectionFailedException {
-    return retryRPC(new RpcCallable<Long>() {
-      @Override
-      public Long call() throws TException {
-        return mClient.getWorkerId(new alluxio.thrift.WorkerNetAddress(address.getHost(),
-            address.getRpcPort(), address.getDataPort(), address.getWebPort()));
-      }
+  public long getId(final WorkerNetAddress address) throws IOException {
+    return retryRPC((RpcCallable<Long>) () -> {
+      GetWorkerIdPRequest request =
+          GetWorkerIdPRequest.newBuilder().setWorkerNetAddress(GrpcUtils.toProto(address)).build();
+      return mClient.getWorkerId(request).getWorkerId();
     });
   }
 
@@ -119,22 +128,29 @@ public final class BlockMasterClient extends AbstractMasterClient {
    * The method the worker should periodically execute to heartbeat back to the master.
    *
    * @param workerId the worker id
+   * @param capacityBytesOnTiers a mapping from storage tier alias to capacity bytes
    * @param usedBytesOnTiers a mapping from storage tier alias to used bytes
    * @param removedBlocks a list of block removed from this worker
    * @param addedBlocks a mapping from storage tier alias to added blocks
+   * @param metrics a list of worker metrics
    * @return an optional command for the worker to execute
-   * @throws ConnectionFailedException if network connection failed
-   * @throws IOException if an I/O error occurs
    */
   public synchronized Command heartbeat(final long workerId,
-      final Map<String, Long> usedBytesOnTiers, final List<Long> removedBlocks,
-      final Map<String, List<Long>> addedBlocks) throws IOException, ConnectionFailedException {
-    return retryRPC(new RpcCallable<Command>() {
-      @Override
-      public Command call() throws TException {
-        return mClient.heartbeat(workerId, usedBytesOnTiers, removedBlocks, addedBlocks);
-      }
-    });
+      final Map<String, Long> capacityBytesOnTiers, final Map<String, Long> usedBytesOnTiers,
+      final List<Long> removedBlocks, final Map<String, List<Long>> addedBlocks,
+      final List<Metric> metrics) throws IOException {
+    final BlockHeartbeatPOptions options = BlockHeartbeatPOptions.newBuilder()
+        .addAllMetrics(metrics).putAllCapacityBytesOnTiers(capacityBytesOnTiers).build();
+    Map<String, TierList> addedBlocksMap = new HashMap<>(addedBlocks.size());
+    for (Map.Entry<String, List<Long>> blockEntry : addedBlocks.entrySet()) {
+      addedBlocksMap.put(blockEntry.getKey(),
+          TierList.newBuilder().addAllTiers(blockEntry.getValue()).build());
+    }
+    final BlockHeartbeatPRequest request = BlockHeartbeatPRequest.newBuilder().setWorkerId(workerId)
+        .putAllUsedBytesOnTiers(usedBytesOnTiers).addAllRemovedBlockIds(removedBlocks)
+        .putAllAddedBlocksOnTiers(addedBlocksMap).setOptions(options).build();
+
+    return retryRPC(() -> mClient.blockHeartbeat(request).getCommand());
   }
 
   /**
@@ -145,20 +161,29 @@ public final class BlockMasterClient extends AbstractMasterClient {
    * @param totalBytesOnTiers mapping from storage tier alias to total bytes
    * @param usedBytesOnTiers mapping from storage tier alias to used bytes
    * @param currentBlocksOnTiers mapping from storage tier alias to the list of list of blocks
-   * @throws AlluxioException if registering the worker fails
-   * @throws IOException if an I/O error occurs or the workerId doesn't exist
+   * @param configList a list of configurations
    */
   // TODO(yupeng): rename to workerBlockReport or workerInitialize?
-  public synchronized void register(final long workerId, final List<String> storageTierAliases,
+  public void register(final long workerId, final List<String> storageTierAliases,
       final Map<String, Long> totalBytesOnTiers, final Map<String, Long> usedBytesOnTiers,
-      final Map<String, List<Long>> currentBlocksOnTiers) throws AlluxioException, IOException {
-    retryRPC(new RpcCallableThrowsAlluxioTException<Void>() {
-      @Override
-      public Void call() throws AlluxioTException, TException {
-        mClient.registerWorker(workerId, storageTierAliases, totalBytesOnTiers, usedBytesOnTiers,
-            currentBlocksOnTiers);
-        return null;
-      }
+      final Map<String, List<Long>> currentBlocksOnTiers, final List<ConfigProperty> configList)
+      throws IOException {
+
+    final RegisterWorkerPOptions options =
+        RegisterWorkerPOptions.newBuilder().addAllConfigs(configList).build();
+    Map<String, TierList> currentBlockOnTiersMap = new HashMap<>(currentBlocksOnTiers.size());
+    for (Map.Entry<String, List<Long>> blockEntry : currentBlocksOnTiers.entrySet()) {
+      currentBlockOnTiersMap.put(blockEntry.getKey(),
+          TierList.newBuilder().addAllTiers(blockEntry.getValue()).build());
+    }
+    final RegisterWorkerPRequest request = RegisterWorkerPRequest.newBuilder().setWorkerId(workerId)
+        .addAllStorageTiers(storageTierAliases).putAllTotalBytesOnTiers(totalBytesOnTiers)
+        .putAllUsedBytesOnTiers(usedBytesOnTiers).putAllCurrentBlocksOnTiers(currentBlockOnTiersMap)
+        .setOptions(options).build();
+
+    retryRPC(() -> {
+      mClient.registerWorker(request);
+      return null;
     });
   }
 }

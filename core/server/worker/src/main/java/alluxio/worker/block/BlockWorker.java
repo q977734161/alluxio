@@ -14,9 +14,11 @@ package alluxio.worker.block;
 import alluxio.exception.BlockAlreadyExistsException;
 import alluxio.exception.BlockDoesNotExistException;
 import alluxio.exception.InvalidWorkerStateException;
+import alluxio.exception.UfsBlockAccessTokenUnavailableException;
 import alluxio.exception.WorkerOutOfSpaceException;
+import alluxio.proto.dataserver.Protocol;
 import alluxio.wire.FileInfo;
-import alluxio.wire.WorkerNetAddress;
+import alluxio.worker.SessionCleanable;
 import alluxio.worker.Worker;
 import alluxio.worker.block.io.BlockReader;
 import alluxio.worker.block.io.BlockWriter;
@@ -24,27 +26,21 @@ import alluxio.worker.block.meta.BlockMeta;
 
 import java.io.IOException;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A block worker in the Alluxio system.
  */
-public interface BlockWorker extends Worker {
-  /**
-   * Initializes the block worker. This must be called before calling {@link #start()}.
-   *
-   * @param workerNetAddress the connection information for the worker
-   */
-  void init(WorkerNetAddress workerNetAddress);
-
+public interface BlockWorker extends Worker, SessionCleanable {
   /**
    * @return the worker data service bind host
    */
   BlockStore getBlockStore();
 
   /**
-   * @return the worker service handler
+   * @return the worker id
    */
-  BlockWorkerClientServiceHandler getWorkerServiceHandler();
+  AtomicReference<Long> getWorkerId();
 
   /**
    * Aborts the temporary block created by the session.
@@ -54,7 +50,6 @@ public interface BlockWorker extends Worker {
    * @throws BlockAlreadyExistsException if blockId already exists in committed blocks
    * @throws BlockDoesNotExistException if the temporary block cannot be found
    * @throws InvalidWorkerStateException if blockId does not belong to sessionId
-   * @throws IOException if temporary block cannot be deleted
    */
   void abortBlock(long sessionId, long blockId) throws BlockAlreadyExistsException,
       BlockDoesNotExistException, InvalidWorkerStateException, IOException;
@@ -80,12 +75,19 @@ public interface BlockWorker extends Worker {
    * @throws BlockAlreadyExistsException if blockId already exists in committed blocks
    * @throws BlockDoesNotExistException if the temporary block cannot be found
    * @throws InvalidWorkerStateException if blockId does not belong to sessionId
-   * @throws IOException if the block cannot be moved from temporary path to committed path
    * @throws WorkerOutOfSpaceException if there is no more space left to hold the block
    */
   void commitBlock(long sessionId, long blockId)
       throws BlockAlreadyExistsException, BlockDoesNotExistException, InvalidWorkerStateException,
       IOException, WorkerOutOfSpaceException;
+
+  /**
+   * Commits a block in UFS.
+   *
+   * @param blockId the id of the block to commit
+   * @param length length of the block to commit
+   */
+  void commitBlockInUfs(long blockId, long length) throws IOException;
 
   /**
    * Creates a block in Alluxio managed space. The block will be temporary until it is committed.
@@ -100,15 +102,15 @@ public interface BlockWorker extends Worker {
    * @throws BlockAlreadyExistsException if blockId already exists, either temporary or committed,
    *         or block in eviction plan already exists
    * @throws WorkerOutOfSpaceException if this Store has no more space than the initialBlockSize
-   * @throws IOException if blocks in eviction plan fail to be moved or deleted
    */
   String createBlock(long sessionId, long blockId, String tierAlias, long initialBytes)
       throws BlockAlreadyExistsException, WorkerOutOfSpaceException, IOException;
 
   /**
    * Creates a block. This method is only called from a data server.
-   * Calls {@link #getTempBlockWriterRemote(long, long)} to get a writer for writing to the block.
-   * Throws an {@link IllegalArgumentException} if the location does not belong to tiered storage.
+   * Calls {@link #getTempBlockWriterRemote(long, long)} to get a writer for writing to the
+   * block. Throws an {@link IllegalArgumentException} if the location does not belong to tiered
+   * storage.
    *
    * @param sessionId the id of the client
    * @param blockId the id of the block to be created
@@ -117,20 +119,20 @@ public interface BlockWorker extends Worker {
    * @throws BlockAlreadyExistsException if blockId already exists, either temporary or committed,
    *         or block in eviction plan already exists
    * @throws WorkerOutOfSpaceException if this Store has no more space than the initialBlockSize
-   * @throws IOException if blocks in eviction plan fail to be moved or deleted
    */
   void createBlockRemote(long sessionId, long blockId, String tierAlias, long initialBytes)
       throws BlockAlreadyExistsException, WorkerOutOfSpaceException, IOException;
 
   /**
-   * Frees space to make a specific amount of bytes available in the tier.
+   * Frees space to make a specific amount of bytes available in a best-effort way in the tier. The
+   * implementation should try to free at least 1 byte from the worker, otherwise a
+   * {@link WorkerOutOfSpaceException} should be thrown if no space is available.
    *
    * @param sessionId the session id
    * @param availableBytes the amount of free space in bytes
    * @param tierAlias the alias of the tier to free space
    * @throws WorkerOutOfSpaceException if there is not enough space
    * @throws BlockDoesNotExistException if blocks can not be found
-   * @throws IOException if blocks fail to be moved or deleted on file system
    * @throws BlockAlreadyExistsException if blocks to move already exists in destination location
    * @throws InvalidWorkerStateException if blocks to move/evict is uncommitted
    */
@@ -149,10 +151,12 @@ public interface BlockWorker extends Worker {
    * @param blockId the id of the block to be opened for writing
    * @return the block writer for the local block file
    * @throws BlockDoesNotExistException if the block cannot be found
-   * @throws IOException if block cannot be created
+   * @throws BlockAlreadyExistsException if a committed block with the same ID exists
+   * @throws InvalidWorkerStateException if the worker state is invalid
    */
   BlockWriter getTempBlockWriterRemote(long sessionId, long blockId)
-      throws BlockDoesNotExistException, IOException;
+      throws BlockDoesNotExistException, BlockAlreadyExistsException, InvalidWorkerStateException,
+      IOException;
 
   /**
    * Gets a report for the periodic heartbeat to master. Contains the blocks added since the last
@@ -225,6 +229,17 @@ public interface BlockWorker extends Worker {
   long lockBlock(long sessionId, long blockId) throws BlockDoesNotExistException;
 
   /**
+   * Obtains a read lock the block without throwing an exception. If the lock fails, return
+   * {@link BlockLockManager#INVALID_LOCK_ID}.
+   *
+   * @param sessionId the id of the client
+   * @param blockId the id of the block to be locked
+   * @return the lock id that uniquely identifies the lock obtained or
+   *         {@link BlockLockManager#INVALID_LOCK_ID} if it failed to lock
+   */
+  long lockBlockNoException(long sessionId, long blockId);
+
+  /**
    * Moves a block from its current location to a target location, currently only tier level moves
    * are supported. Throws an {@link IllegalArgumentException} if the tierAlias is out of range of
    * tiered storage.
@@ -238,7 +253,6 @@ public interface BlockWorker extends Worker {
    * @throws InvalidWorkerStateException if blockId has not been committed
    * @throws WorkerOutOfSpaceException if newLocation does not have enough extra space to hold the
    *         block
-   * @throws IOException if block cannot be moved from current location to newLocation
    */
   void moveBlock(long sessionId, long blockId, String tierAlias)
       throws BlockDoesNotExistException, BlockAlreadyExistsException, InvalidWorkerStateException,
@@ -270,10 +284,21 @@ public interface BlockWorker extends Worker {
    * @throws BlockDoesNotExistException if lockId is not found
    * @throws InvalidWorkerStateException if sessionId or blockId is not the same as that in the
    *         LockRecord of lockId
-   * @throws IOException if block cannot be read
    */
   BlockReader readBlockRemote(long sessionId, long blockId, long lockId)
       throws BlockDoesNotExistException, InvalidWorkerStateException, IOException;
+
+  /**
+   * Gets a block reader to read a UFS block. This method is only called by the data server.
+   *
+   * @param sessionId the client session ID
+   * @param blockId the ID of the UFS block to read
+   * @param offset the offset within the block
+   * @return the block reader instance
+   * @throws BlockDoesNotExistException if the block does not exist in the UFS block store
+   */
+  BlockReader readUfsBlock(long sessionId, long blockId, long offset)
+      throws BlockDoesNotExistException, IOException;
 
   /**
    * Frees a block from Alluxio managed space.
@@ -282,7 +307,6 @@ public interface BlockWorker extends Worker {
    * @param blockId the id of the block to be freed
    * @throws InvalidWorkerStateException if blockId has not been committed
    * @throws BlockDoesNotExistException if block cannot be found
-   * @throws IOException if block cannot be removed from current path
    */
   void removeBlock(long sessionId, long blockId)
       throws InvalidWorkerStateException, BlockDoesNotExistException, IOException;
@@ -297,8 +321,6 @@ public interface BlockWorker extends Worker {
    * @throws BlockDoesNotExistException if blockId can not be found, or some block in eviction plan
    *         cannot be found
    * @throws WorkerOutOfSpaceException if requested space can not be satisfied
-   * @throws IOException if blocks in {@link alluxio.worker.block.evictor.EvictionPlan} fail to be
-   *         moved or deleted on file system
    */
   void requestSpace(long sessionId, long blockId, long additionalBytes)
       throws BlockDoesNotExistException, WorkerOutOfSpaceException, IOException;
@@ -316,10 +338,10 @@ public interface BlockWorker extends Worker {
    *
    * @param sessionId the session id
    * @param blockId the block id
-   * @throws BlockDoesNotExistException if block id cannot be found
+   * @return false if it fails to unlock due to the lock is not found
    */
   // TODO(calvin): Remove when lock and reads are separate operations.
-  void unlockBlock(long sessionId, long blockId) throws BlockDoesNotExistException;
+  boolean unlockBlock(long sessionId, long blockId);
 
   /**
    * Handles the heartbeat from a client.
@@ -340,7 +362,37 @@ public interface BlockWorker extends Worker {
    *
    * @param fileId the file id
    * @return the file info
-   * @throws IOException if an I/O error occurs
    */
   FileInfo getFileInfo(long fileId) throws IOException;
+
+  /**
+   * Opens a UFS block. It registers the block metadata information to the UFS block store. It
+   * throws an {@link UfsBlockAccessTokenUnavailableException} if the number of concurrent readers
+   * on this block exceeds a threshold.
+   *
+   * @param sessionId the session ID
+   * @param blockId the block ID
+   * @param options the options
+   * @return whether the UFS block is successfully opened
+   * @throws BlockAlreadyExistsException if the UFS block already exists in the
+   *         {@link UnderFileSystemBlockStore}
+   */
+  boolean openUfsBlock(long sessionId, long blockId, Protocol.OpenUfsBlockOptions options)
+      throws BlockAlreadyExistsException;
+
+  /**
+   * Closes a UFS block for a client session. It also commits the block to Alluxio block store
+   * if the UFS block has been cached successfully.
+   *
+   * @param sessionId the session ID
+   * @param blockId the block ID
+   * @throws BlockAlreadyExistsException if it fails to commit the block to Alluxio block store
+   *         because the block exists in the Alluxio block store
+   * @throws BlockDoesNotExistException if the UFS block does not exist in the
+   *         {@link UnderFileSystemBlockStore}
+   * @throws WorkerOutOfSpaceException the the worker does not have enough space to commit the block
+   */
+  void closeUfsBlock(long sessionId, long blockId)
+      throws BlockAlreadyExistsException, BlockDoesNotExistException, IOException,
+      WorkerOutOfSpaceException;
 }

@@ -11,14 +11,17 @@
 
 package alluxio.security.authentication;
 
-import alluxio.Configuration;
+import alluxio.ConfigurationRule;
 import alluxio.ConfigurationTestUtils;
-import alluxio.PropertyKey;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.security.authentication.plain.PlainSaslServerCallbackHandler;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+
 import org.junit.rules.ExpectedException;
 
 import javax.security.auth.callback.Callback;
@@ -31,7 +34,7 @@ import javax.security.sasl.AuthorizeCallback;
 /**
  * Tests the {@link PlainSaslServerCallbackHandler} class.
  */
-public class PlainSaslServerCallbackHandlerTest {
+public final class PlainSaslServerCallbackHandlerTest {
   private CallbackHandler mPlainServerCBHandler;
 
   /**
@@ -40,33 +43,29 @@ public class PlainSaslServerCallbackHandlerTest {
   @Rule
   public ExpectedException mThrown = ExpectedException.none();
 
+  private InstancedConfiguration mConfiguration = ConfigurationTestUtils.defaults();
+
+  @Rule
+  public ConfigurationRule mConfigurationRule =
+      new ConfigurationRule(PropertyKey.SECURITY_AUTHENTICATION_CUSTOM_PROVIDER_CLASS,
+          NameMatchAuthenticationProvider.class.getName(), mConfiguration);
+
   /**
    * Sets up the configuration and callback handler before running a test.
-   *
-   * @throws Exception thrown if the authentication provider cannot be set up
    */
   @Before
   public void before() throws Exception {
-    Configuration.set(PropertyKey.SECURITY_AUTHENTICATION_CUSTOM_PROVIDER_CLASS,
-        NameMatchAuthenticationProvider.class.getName());
     mPlainServerCBHandler = new PlainSaslServerCallbackHandler(
-        AuthenticationProvider.Factory.create(AuthType.CUSTOM),
-        new Runnable() {
-          @Override
-          public void run() {}
-        });
+        AuthenticationProvider.Factory.create(AuthType.CUSTOM, mConfiguration), mConfiguration);
   }
 
   @After
   public void after() {
     AuthenticatedClientUser.remove();
-    ConfigurationTestUtils.resetConfiguration();
   }
 
   /**
    * Tests that the authentication callbacks matches.
-   *
-   * @throws Exception thrown if the handler fails
    */
   @Test
   public void authenticateNameMatch() throws Exception {
@@ -77,8 +76,8 @@ public class PlainSaslServerCallbackHandlerTest {
     PasswordCallback pcb = new PasswordCallback(" password: ", false);
     pcb.setPassword("password".toCharArray());
 
-    Callback[] callbacks = new Callback[]{ncb, pcb,
-        new AuthorizeCallback(authenticateId, authenticateId)};
+    Callback[] callbacks =
+        new Callback[] {ncb, pcb, new AuthorizeCallback(authenticateId, authenticateId)};
     mPlainServerCBHandler.handle(callbacks);
   }
 
@@ -97,8 +96,8 @@ public class PlainSaslServerCallbackHandlerTest {
     PasswordCallback pcb = new PasswordCallback(" password: ", false);
     pcb.setPassword("password".toCharArray());
 
-    Callback[] callbacks = new Callback[]{ncb, pcb,
-        new AuthorizeCallback(authenticateId, authenticateId)};
+    Callback[] callbacks =
+        new Callback[] {ncb, pcb, new AuthorizeCallback(authenticateId, authenticateId)};
     mPlainServerCBHandler.handle(callbacks);
   }
 
@@ -117,14 +116,14 @@ public class PlainSaslServerCallbackHandlerTest {
     PasswordCallback pcb = new PasswordCallback(" password: ", false);
     pcb.setPassword("not-password".toCharArray());
 
-    Callback[] callbacks = new Callback[]{ncb, pcb,
-        new AuthorizeCallback(authenticateId, authenticateId)};
+    Callback[] callbacks =
+        new Callback[] {ncb, pcb, new AuthorizeCallback(authenticateId, authenticateId)};
     mPlainServerCBHandler.handle(callbacks);
   }
 
   /**
-   * An {@link AuthenticationProvider} that only allows users starting with alluxio, password
-   * should be "password".
+   * An {@link AuthenticationProvider} that only allows users starting with alluxio, password should
+   * be "password".
    */
   public static class NameMatchAuthenticationProvider implements AuthenticationProvider {
     @Override

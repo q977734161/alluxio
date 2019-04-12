@@ -12,24 +12,23 @@
 package alluxio.cli;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
+import alluxio.ClientContext;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.client.block.BlockMasterClient;
-import alluxio.client.block.RetryHandlingBlockMasterClient;
 import alluxio.client.file.FileInStream;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
-import alluxio.exception.ConnectionFailedException;
+import alluxio.exception.status.UnavailableException;
+import alluxio.master.MasterClientContext;
 import alluxio.util.CommonUtils;
+import alluxio.util.ConfigurationUtils;
 import alluxio.util.WaitForOptions;
 import alluxio.util.io.PathUtils;
-import alluxio.util.network.NetworkAddressUtils;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
-import com.google.common.base.Function;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableMap;
 import org.apache.commons.io.IOUtils;
 import org.slf4j.Logger;
@@ -37,7 +36,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.Map.Entry;
 
@@ -46,10 +44,14 @@ import java.util.Map.Entry;
  * running locally.
  */
 public final class AlluxioFrameworkIntegrationTest {
+  private static final Logger LOG = LoggerFactory.getLogger(AlluxioFrameworkIntegrationTest.class);
+
+  private static InstancedConfiguration sConf =
+      new InstancedConfiguration(ConfigurationUtils.defaults());
+
   private static final String JDK_URL =
       "https://s3-us-west-2.amazonaws.com/alluxio-mesos/jdk-7u79-macosx-x64.tar.gz";
   private static final String JDK_PATH = "jdk1.7.0_79.jdk/Contents/Home";
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
 
   @Parameter(names = {"-m", "--mesos"}, required = true,
       description = "Address for locally-running Mesos, e.g. localhost:5050")
@@ -100,27 +102,21 @@ public final class AlluxioFrameworkIntegrationTest {
     try {
       startAlluxioFramework(env);
       LOG.info("Launched Alluxio cluster, waiting for worker to register with master");
-      String masterHostName = NetworkAddressUtils.getLocalHostName();
-      int masterPort = Configuration.getInt(PropertyKey.MASTER_RPC_PORT);
-      InetSocketAddress masterAddress = new InetSocketAddress(masterHostName, masterPort);
-      try (final BlockMasterClient client = new RetryHandlingBlockMasterClient(null,
-          masterAddress)) {
-        CommonUtils.waitFor("Alluxio worker to register with master",
-            new Function<Void, Boolean>() {
-              @Override
-              public Boolean apply(Void input) {
-                try {
-                  try {
-                    return !client.getWorkerInfoList().isEmpty();
-                  } catch (ConnectionFailedException e) {
-                    // block master isn't up yet, keep waiting
-                    return false;
-                  }
-                } catch (Exception e) {
-                  throw Throwables.propagate(e);
-                }
-              }
-            }, WaitForOptions.defaults().setTimeout(15 * Constants.MINUTE_MS));
+      ClientContext ctx = ClientContext.create(sConf);
+      try (final BlockMasterClient client =
+          BlockMasterClient.Factory.create(MasterClientContext.newBuilder(ctx).build())) {
+        CommonUtils.waitFor("Alluxio worker to register with master", () -> {
+          try {
+            try {
+              return !client.getWorkerInfoList().isEmpty();
+            } catch (UnavailableException e) {
+              // block master isn't up yet, keep waiting
+              return false;
+            }
+          } catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+        }, WaitForOptions.defaults().setTimeoutMs(15 * Constants.MINUTE_MS));
       }
       LOG.info("Worker registered");
       basicAlluxioTests();
@@ -130,7 +126,7 @@ public final class AlluxioFrameworkIntegrationTest {
   }
 
   private void startAlluxioFramework(Map<String, String> extraEnv) {
-    String startScript = PathUtils.concatPath(Configuration.get(PropertyKey.HOME),
+    String startScript = PathUtils.concatPath(sConf.get(PropertyKey.HOME),
         "integration", "mesos", "bin", "alluxio-mesos-start.sh");
     ProcessBuilder pb = new ProcessBuilder(startScript, mMesosAddress);
     Map<String, String> env = pb.environment();
@@ -140,13 +136,13 @@ public final class AlluxioFrameworkIntegrationTest {
     } catch (Exception e) {
       LOG.info("Failed to launch Alluxio on Mesos. Note that this test requires that "
           + "Mesos is currently running.");
-      throw Throwables.propagate(e);
+      throw new RuntimeException(e);
     }
   }
 
   private static void basicAlluxioTests() throws Exception {
     LOG.info("Running tests");
-    FileSystem fs = FileSystem.Factory.get();
+    FileSystem fs = FileSystem.Factory.create(sConf);
     int listSize = fs.listStatus(new AlluxioURI("/")).size();
     if (listSize != 1) {
       throw new RuntimeException("Expected 1 path to exist at the root, but found " + listSize);
@@ -192,7 +188,7 @@ public final class AlluxioFrameworkIntegrationTest {
   }
 
   private static void stopAlluxioFramework() throws Exception {
-    String stopScript = PathUtils.concatPath(Configuration.get(PropertyKey.HOME),
+    String stopScript = PathUtils.concatPath(sConf.get(PropertyKey.HOME),
         "integration", "mesos", "bin", "alluxio-mesos-stop.sh");
     ProcessBuilder pb = new ProcessBuilder(stopScript);
     pb.start().waitFor();
@@ -201,7 +197,7 @@ public final class AlluxioFrameworkIntegrationTest {
   }
 
   private static void stopAlluxio() throws Exception {
-    String stopScript = PathUtils.concatPath(Configuration.get(PropertyKey.HOME),
+    String stopScript = PathUtils.concatPath(sConf.get(PropertyKey.HOME),
         "bin", "alluxio-stop.sh");
     ProcessBuilder pb = new ProcessBuilder(stopScript, "all");
     pb.start().waitFor();
@@ -209,7 +205,6 @@ public final class AlluxioFrameworkIntegrationTest {
 
   /**
    * @param args arguments
-   * @throws Exception if an exception occurs
    */
   public static void main(String[] args) throws Exception {
     AlluxioFrameworkIntegrationTest test = new AlluxioFrameworkIntegrationTest();

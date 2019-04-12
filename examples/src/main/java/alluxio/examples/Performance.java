@@ -12,14 +12,17 @@
 package alluxio.examples;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.RuntimeConstants;
 import alluxio.client.file.FileOutStream;
 import alluxio.client.file.FileSystem;
 import alluxio.exception.AlluxioException;
+import alluxio.grpc.CreateFilePOptions;
 import alluxio.util.CommonUtils;
+import alluxio.util.ConfigurationUtils;
 import alluxio.util.FormatUtils;
 
 import com.google.common.base.Preconditions;
@@ -41,12 +44,11 @@ import java.nio.channels.FileChannel.MapMode;
  * Example to show the performance of Alluxio.
  */
 public final class Performance {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(Performance.class);
 
   private static final int RESULT_ARRAY_SIZE = 64;
   private static final String FOLDER = "/mnt/ramdisk/";
 
-  private static FileSystem sFileSystem = null;
   private static String sFileName = null;
   private static int sBlockSizeBytes = -1;
   private static long sBlocksPerFile = -1;
@@ -61,20 +63,6 @@ public final class Performance {
   private static boolean sAlluxioStreamingRead = false;
 
   private Performance() {} // prevent instantiation
-
-  /**
-   * Creates the files for this example.
-   *
-   * @throws AlluxioException if creating a file fails
-   * @throws IOException if a non-Alluxio related exception occurs
-   */
-  public static void createFiles() throws AlluxioException, IOException {
-    final long startTimeMs = CommonUtils.getCurrentMs();
-    for (int k = 0; k < sFiles; k++) {
-      sFileSystem.createFile(new AlluxioURI(sFileName + (k + sBaseFileNumber))).close();
-      LOG.info(FormatUtils.formatTimeTakenMs(startTimeMs, "createFile"));
-    }
-  }
 
   /**
    * Writes log information.
@@ -140,8 +128,6 @@ public final class Performance {
 
     /**
      * Copies a partition in memory.
-     *
-     * @throws IOException if a non-Alluxio related exception occurs
      */
     public void memoryCopyPartition() throws IOException {
       if (sDebugMode) {
@@ -226,18 +212,15 @@ public final class Performance {
      * @param left the id of the worker on the left
      * @param right the id of the worker on the right
      * @param buf the buffer to write
-     * @throws IOException if a non-Alluxio related exception occurs
+     * @param fs the filesystem client to use
      */
-    public AlluxioWriterWorker(int id, int left, int right, ByteBuffer buf) throws IOException {
+    public AlluxioWriterWorker(int id, int left, int right, ByteBuffer buf, FileSystem fs) {
       super(id, left, right, buf);
-      mFileSystem = FileSystem.Factory.get();
+      mFileSystem = fs;
     }
 
     /**
      * Writes a partition.
-     *
-     * @throws IOException if a non-Alluxio related exception occurs
-     * @throws AlluxioException if the write stream cannot be retrieved
      */
     public void writePartition()
             throws IOException, AlluxioException {
@@ -250,7 +233,8 @@ public final class Performance {
       for (int pId = mLeft; pId < mRight; pId++) {
         final long startTimeMs = System.currentTimeMillis();
         FileOutStream os =
-            mFileSystem.createFile(new AlluxioURI(sFileName + (pId + sBaseFileNumber)));
+            mFileSystem.createFile(new AlluxioURI(sFileName + (pId + sBaseFileNumber)),
+                CreateFilePOptions.newBuilder().setRecursive(true).build());
         for (int k = 0; k < sBlocksPerFile; k++) {
           mBuf.putInt(0, k + mWorkerId);
           os.write(mBuf.array());
@@ -282,18 +266,15 @@ public final class Performance {
      * @param left the id of the worker on the left
      * @param right the id of the worker on the right
      * @param buf the buffer to read
-     * @throws IOException if a non-Alluxio related exception occurs
+     * @param fs the filesystem client to use
      */
-    public AlluxioReadWorker(int id, int left, int right, ByteBuffer buf) throws IOException {
+    public AlluxioReadWorker(int id, int left, int right, ByteBuffer buf, FileSystem fs) {
       super(id, left, right, buf);
-      mFileSystem = FileSystem.Factory.get();
+      mFileSystem = fs;
     }
 
     /**
      * Reads a partition.
-     *
-     * @throws IOException if a non-Alluxio related exception occurs
-     * @throws AlluxioException if the file cannot be opened or the stream cannot be retrieved
      */
     public void readPartition() throws IOException, AlluxioException {
       if (sDebugMode) {
@@ -384,7 +365,6 @@ public final class Performance {
      * @param buf the buffer
      * @param write indicates if data is written to HDFS
      * @param msg the message to write
-     * @throws IOException if a non-Alluxio related exception occurs
      */
     public HdfsWorker(int id, int left, int right, ByteBuffer buf, boolean write, String msg)
         throws IOException {
@@ -411,8 +391,6 @@ public final class Performance {
 
     /**
      * Creates IO utilization.
-     *
-     * @throws IOException if a non-Alluxio related exception occurs
      */
     public void io() throws IOException {
       if (sDebugMode) {
@@ -504,7 +482,7 @@ public final class Performance {
         + takenTimeMs + " ms. Current System Time: " + System.currentTimeMillis());
   }
 
-  private static void AlluxioTest(boolean write) throws IOException {
+  private static void AlluxioTest(boolean write, FileSystem fs) throws IOException {
     ByteBuffer[] bufs = new ByteBuffer[sThreads];
 
     for (int thread = 0; thread < sThreads; thread++) {
@@ -521,10 +499,10 @@ public final class Performance {
     for (int thread = 0; thread < sThreads; thread++) {
       if (write) {
         workerThreads[thread] =
-            new AlluxioWriterWorker(thread, t * thread, t * (thread + 1), bufs[thread]);
+            new AlluxioWriterWorker(thread, t * thread, t * (thread + 1), bufs[thread], fs);
       } else {
         workerThreads[thread] =
-            new AlluxioReadWorker(thread, t * thread, t * (thread + 1), bufs[thread]);
+            new AlluxioReadWorker(thread, t * thread, t * (thread + 1), bufs[thread], fs);
       }
     }
 
@@ -591,7 +569,6 @@ public final class Performance {
    * <TestCaseNumber> <BaseFileNumber>}
    *
    * @param args the arguments for this example
-   * @throws Exception if the example fails
    */
   public static void main(String[] args) throws Exception {
     if (args.length != 9) {
@@ -604,6 +581,8 @@ public final class Performance {
           + "6: ByteBuffer Read Test \n");
       System.exit(-1);
     }
+
+    InstancedConfiguration conf = new InstancedConfiguration(ConfigurationUtils.defaults());
 
     HostAndPort masterAddress = HostAndPort.fromString(args[0]);
     sFileName = args[1];
@@ -618,7 +597,7 @@ public final class Performance {
     sFileBytes = sBlocksPerFile * sBlockSizeBytes;
     sFilesBytes = sFileBytes * sFiles;
 
-    long fileBufferBytes = Configuration.getBytes(PropertyKey.USER_FILE_BUFFER_BYTES);
+    long fileBufferBytes = conf.getBytes(PropertyKey.USER_FILE_BUFFER_BYTES);
     sResultPrefix = String.format(
         "Threads %d FilesPerThread %d TotalFiles %d "
             + "BLOCK_SIZE_KB %d BLOCKS_PER_FILE %d FILE_SIZE_MB %d "
@@ -628,20 +607,20 @@ public final class Performance {
 
     CommonUtils.warmUpLoop();
 
-    Configuration.set(PropertyKey.MASTER_HOSTNAME, masterAddress.getHostText());
-    Configuration.set(PropertyKey.MASTER_RPC_PORT, Integer.toString(masterAddress.getPort()));
+    conf.set(PropertyKey.MASTER_HOSTNAME, masterAddress.getHost());
+    conf.set(PropertyKey.MASTER_RPC_PORT, Integer.toString(masterAddress.getPort()));
+
+    FileSystemContext fsContext = FileSystemContext.create(conf);
 
     if (testCase == 1) {
       sResultPrefix = "AlluxioFilesWriteTest " + sResultPrefix;
       LOG.info(sResultPrefix);
-      sFileSystem = FileSystem.Factory.get();
-      AlluxioTest(true /* write */);
+      AlluxioTest(true /* write */, FileSystem.Factory.create(fsContext));
     } else if (testCase == 2 || testCase == 9) {
       sResultPrefix = "AlluxioFilesReadTest " + sResultPrefix;
       LOG.info(sResultPrefix);
-      sFileSystem = FileSystem.Factory.get();
       sAlluxioStreamingRead = (9 == testCase);
-      AlluxioTest(false /* read */);
+      AlluxioTest(false /* read */, FileSystem.Factory.create(fsContext));
     } else if (testCase == 3) {
       sResultPrefix = "RamFile Write " + sResultPrefix;
       LOG.info(sResultPrefix);

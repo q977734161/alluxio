@@ -12,50 +12,104 @@
 package alluxio.master.file;
 
 import alluxio.AlluxioURI;
-import alluxio.Constants;
 import alluxio.RpcUtils;
-import alluxio.RpcUtils.RpcCallable;
-import alluxio.RpcUtils.RpcCallableThrowsIOException;
-import alluxio.exception.AlluxioException;
-import alluxio.master.file.options.CheckConsistencyOptions;
-import alluxio.master.file.options.CompleteFileOptions;
-import alluxio.master.file.options.CreateDirectoryOptions;
-import alluxio.master.file.options.CreateFileOptions;
-import alluxio.master.file.options.FreeOptions;
-import alluxio.master.file.options.ListStatusOptions;
-import alluxio.master.file.options.LoadMetadataOptions;
-import alluxio.master.file.options.MountOptions;
-import alluxio.master.file.options.RenameOptions;
-import alluxio.master.file.options.SetAttributeOptions;
-import alluxio.thrift.AlluxioTException;
-import alluxio.thrift.CheckConsistencyTOptions;
-import alluxio.thrift.CompleteFileTOptions;
-import alluxio.thrift.CreateDirectoryTOptions;
-import alluxio.thrift.CreateFileTOptions;
-import alluxio.thrift.FileBlockInfo;
-import alluxio.thrift.FileInfo;
-import alluxio.thrift.FileSystemMasterClientService;
-import alluxio.thrift.FreeTOptions;
-import alluxio.thrift.ListStatusTOptions;
-import alluxio.thrift.MountTOptions;
-import alluxio.thrift.SetAttributeTOptions;
-import alluxio.thrift.ThriftIOException;
-import alluxio.wire.ThriftUtils;
+import alluxio.grpc.CheckConsistencyPOptions;
+import alluxio.grpc.CheckConsistencyPRequest;
+import alluxio.grpc.CheckConsistencyPResponse;
+import alluxio.grpc.CompleteFilePOptions;
+import alluxio.grpc.CompleteFilePRequest;
+import alluxio.grpc.CompleteFilePResponse;
+import alluxio.grpc.CreateDirectoryPOptions;
+import alluxio.grpc.CreateDirectoryPRequest;
+import alluxio.grpc.CreateDirectoryPResponse;
+import alluxio.grpc.CreateFilePOptions;
+import alluxio.grpc.CreateFilePRequest;
+import alluxio.grpc.CreateFilePResponse;
+import alluxio.grpc.DeletePOptions;
+import alluxio.grpc.DeletePRequest;
+import alluxio.grpc.DeletePResponse;
+import alluxio.grpc.FileInfo;
+import alluxio.grpc.FileSystemMasterClientServiceGrpc;
+import alluxio.grpc.FreePOptions;
+import alluxio.grpc.FreePRequest;
+import alluxio.grpc.FreePResponse;
+import alluxio.grpc.GetFilePathPRequest;
+import alluxio.grpc.GetFilePathPResponse;
+import alluxio.grpc.GetMountTablePRequest;
+import alluxio.grpc.GetMountTablePResponse;
+import alluxio.grpc.GetNewBlockIdForFilePOptions;
+import alluxio.grpc.GetNewBlockIdForFilePRequest;
+import alluxio.grpc.GetNewBlockIdForFilePResponse;
+import alluxio.grpc.GetStatusPOptions;
+import alluxio.grpc.GetStatusPRequest;
+import alluxio.grpc.GetStatusPResponse;
+import alluxio.grpc.GetSyncPathListPRequest;
+import alluxio.grpc.GetSyncPathListPResponse;
+import alluxio.grpc.ListStatusPOptions;
+import alluxio.grpc.ListStatusPRequest;
+import alluxio.grpc.ListStatusPResponse;
+import alluxio.grpc.MountPOptions;
+import alluxio.grpc.MountPRequest;
+import alluxio.grpc.MountPResponse;
+import alluxio.grpc.PAclEntry;
+import alluxio.grpc.RenamePOptions;
+import alluxio.grpc.RenamePRequest;
+import alluxio.grpc.RenamePResponse;
+import alluxio.grpc.ScheduleAsyncPersistencePOptions;
+import alluxio.grpc.ScheduleAsyncPersistencePRequest;
+import alluxio.grpc.ScheduleAsyncPersistencePResponse;
+import alluxio.grpc.SetAclPOptions;
+import alluxio.grpc.SetAclPRequest;
+import alluxio.grpc.SetAclPResponse;
+import alluxio.grpc.SetAttributePOptions;
+import alluxio.grpc.SetAttributePRequest;
+import alluxio.grpc.SetAttributePResponse;
+import alluxio.grpc.StartSyncPRequest;
+import alluxio.grpc.StartSyncPResponse;
+import alluxio.grpc.StopSyncPRequest;
+import alluxio.grpc.StopSyncPResponse;
+import alluxio.grpc.UnmountPOptions;
+import alluxio.grpc.UnmountPRequest;
+import alluxio.grpc.UnmountPResponse;
+import alluxio.grpc.UpdateUfsModePOptions;
+import alluxio.grpc.UpdateUfsModePRequest;
+import alluxio.grpc.UpdateUfsModePResponse;
+import alluxio.master.file.contexts.CheckConsistencyContext;
+import alluxio.master.file.contexts.CompleteFileContext;
+import alluxio.master.file.contexts.CreateDirectoryContext;
+import alluxio.master.file.contexts.CreateFileContext;
+import alluxio.master.file.contexts.DeleteContext;
+import alluxio.master.file.contexts.FreeContext;
+import alluxio.master.file.contexts.GetStatusContext;
+import alluxio.master.file.contexts.ListStatusContext;
+import alluxio.master.file.contexts.MountContext;
+import alluxio.master.file.contexts.RenameContext;
+import alluxio.master.file.contexts.SetAclContext;
+import alluxio.master.file.contexts.SetAttributeContext;
+import alluxio.underfs.UfsMode;
+import alluxio.grpc.GrpcUtils;
+import alluxio.wire.MountPointInfo;
+import alluxio.grpc.SetAclAction;
+import alluxio.wire.SyncPointInfo;
 
 import com.google.common.base.Preconditions;
+import io.grpc.stub.StreamObserver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-
-import javax.annotation.concurrent.NotThreadSafe;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
- * This class is a Thrift handler for file system master RPCs invoked by an Alluxio client.
+ * This class is a gRPC handler for file system master RPCs invoked by an Alluxio client.
  */
-@NotThreadSafe // TODO(jiri): make thread-safe (c.f. ALLUXIO-1664)
-public final class FileSystemMasterClientServiceHandler implements
-    FileSystemMasterClientService.Iface {
+public final class FileSystemMasterClientServiceHandler
+    extends FileSystemMasterClientServiceGrpc.FileSystemMasterClientServiceImplBase {
+  private static final Logger LOG =
+      LoggerFactory.getLogger(FileSystemMasterClientServiceHandler.class);
   private final FileSystemMaster mFileSystemMaster;
 
   /**
@@ -64,267 +118,275 @@ public final class FileSystemMasterClientServiceHandler implements
    * @param fileSystemMaster the {@link FileSystemMaster} the handler uses internally
    */
   public FileSystemMasterClientServiceHandler(FileSystemMaster fileSystemMaster) {
-    Preconditions.checkNotNull(fileSystemMaster);
+    Preconditions.checkNotNull(fileSystemMaster, "fileSystemMaster");
     mFileSystemMaster = fileSystemMaster;
   }
 
   @Override
-  public long getServiceVersion() {
-    return Constants.FILE_SYSTEM_MASTER_CLIENT_SERVICE_VERSION;
+  public void checkConsistency(CheckConsistencyPRequest request,
+      StreamObserver<CheckConsistencyPResponse> responseObserver) {
+    String path = request.getPath();
+    CheckConsistencyPOptions options = request.getOptions();
+    RpcUtils.call(LOG,
+        (RpcUtils.RpcCallableThrowsIOException<CheckConsistencyPResponse>) () -> {
+          List<AlluxioURI> inconsistentUris = mFileSystemMaster.checkConsistency(
+              new AlluxioURI(path), CheckConsistencyContext.create(options.toBuilder()));
+          List<String> uris = new ArrayList<>(inconsistentUris.size());
+          for (AlluxioURI uri : inconsistentUris) {
+            uris.add(uri.getPath());
+          }
+          return CheckConsistencyPResponse.newBuilder().addAllInconsistentPaths(uris).build();
+        }, "CheckConsistency", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public List<String> checkConsistency(final String path, final CheckConsistencyTOptions options)
-      throws AlluxioTException, ThriftIOException {
-    return RpcUtils.call(new RpcCallableThrowsIOException<List<String>>() {
-      @Override
-      public List<String> call() throws AlluxioException, IOException {
-        List<AlluxioURI> inconsistentUris = mFileSystemMaster.checkConsistency(
-            new AlluxioURI(path), new CheckConsistencyOptions(options));
-        List<String> uris = new ArrayList<>(inconsistentUris.size());
-        for (AlluxioURI uri : inconsistentUris) {
-          uris.add(uri.getPath());
-        }
-        return uris;
-      }
-    });
+  public void completeFile(CompleteFilePRequest request,
+      StreamObserver<CompleteFilePResponse> responseObserver) {
+    String path = request.getPath();
+    CompleteFilePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<CompleteFilePResponse>) () -> {
+      mFileSystemMaster.completeFile(new AlluxioURI(path),
+          CompleteFileContext.create(options.toBuilder()));
+      return CompleteFilePResponse.newBuilder().build();
+    }, "CompleteFile", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public void completeFile(final String path, final CompleteFileTOptions options)
-      throws AlluxioTException {
-    RpcUtils.call(new RpcCallable<Void>() {
-      @Override
-      public Void call() throws AlluxioException {
-        mFileSystemMaster.completeFile(new AlluxioURI(path), new CompleteFileOptions(options));
-        return null;
-      }
-    });
+  public void createDirectory(CreateDirectoryPRequest request,
+      StreamObserver<CreateDirectoryPResponse> responseObserver) {
+    String path = request.getPath();
+    CreateDirectoryPOptions options = request.getOptions();
+    RpcUtils.call(LOG,
+        (RpcUtils.RpcCallableThrowsIOException<CreateDirectoryPResponse>) () -> {
+          mFileSystemMaster.createDirectory(new AlluxioURI(path),
+              CreateDirectoryContext.create(options.toBuilder()));
+          return CreateDirectoryPResponse.newBuilder().build();
+        }, "CreateDirectory", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public void createDirectory(final String path, final CreateDirectoryTOptions options)
-      throws AlluxioTException, ThriftIOException {
-    RpcUtils.call(new RpcCallableThrowsIOException<Void>() {
-      @Override
-      public Void call() throws AlluxioException, IOException {
-        mFileSystemMaster.createDirectory(new AlluxioURI(path),
-            new CreateDirectoryOptions(options));
-        return null;
-      }
-    });
+  public void createFile(CreateFilePRequest request,
+      StreamObserver<CreateFilePResponse> responseObserver) {
+    String path = request.getPath();
+    CreateFilePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<CreateFilePResponse>)
+        () -> CreateFilePResponse.newBuilder().setFileInfo(GrpcUtils.toProto(
+            mFileSystemMaster.createFile(new AlluxioURI(path),
+                CreateFileContext.create(options.toBuilder())))).build(),
+        "CreateFile", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public void createFile(final String path, final CreateFileTOptions options)
-      throws AlluxioTException, ThriftIOException {
-    RpcUtils.call(new RpcCallableThrowsIOException<Void>() {
-      @Override
-      public Void call() throws AlluxioException, IOException {
-        mFileSystemMaster.createFile(new AlluxioURI(path), new CreateFileOptions(options));
-        return null;
-      }
-    });
+  public void free(FreePRequest request, StreamObserver<FreePResponse> responseObserver) {
+    String path = request.getPath();
+    FreePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<FreePResponse>) () -> {
+      mFileSystemMaster.free(new AlluxioURI(path), FreeContext.create(options.toBuilder()));
+      return FreePResponse.newBuilder().build();
+    }, "Free", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public void free(final String path, final boolean recursive, final FreeTOptions options)
-      throws AlluxioTException {
-    RpcUtils.call(new RpcCallable<Void>() {
-      @Override
-      public Void call() throws AlluxioException {
-        if (options == null) {
-          // For Alluxio client v1.4 or earlier.
-          // NOTE, we try to be conservative here so early Alluxio clients will not be able to force
-          // freeing pinned items but see the error thrown.
-          mFileSystemMaster.free(new AlluxioURI(path),
-              FreeOptions.defaults().setRecursive(recursive));
-        } else {
-          mFileSystemMaster.free(new AlluxioURI(path), new FreeOptions(options));
-        }
-        return null;
-      }
-    });
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @deprecated since version 1.1 and will be removed in version 2.0
-   * @see #getStatus(String)
-   */
-  @Override
-  @Deprecated
-  public List<FileBlockInfo> getFileBlockInfoList(final String path) throws AlluxioTException {
-    return RpcUtils.call(new RpcCallable<List<FileBlockInfo>>() {
-      @Override
-      public List<FileBlockInfo> call() throws AlluxioException {
-        List<FileBlockInfo> result = new ArrayList<>();
-        for (alluxio.wire.FileBlockInfo fileBlockInfo :
-            mFileSystemMaster.getFileBlockInfoList(new AlluxioURI(path))) {
-          result.add(ThriftUtils.toThrift(fileBlockInfo));
-        }
-        return result;
-      }
-    });
+  public void getNewBlockIdForFile(GetNewBlockIdForFilePRequest request,
+      StreamObserver<GetNewBlockIdForFilePResponse> responseObserver) {
+    String path = request.getPath();
+    GetNewBlockIdForFilePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<GetNewBlockIdForFilePResponse>)
+        () -> GetNewBlockIdForFilePResponse.newBuilder()
+            .setId(mFileSystemMaster.getNewBlockIdForFile(new AlluxioURI(path))).build(),
+        "GetNewBlockIdForFile", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public long getNewBlockIdForFile(final String path) throws AlluxioTException {
-    return RpcUtils.call(new RpcCallable<Long>() {
-      @Override
-      public Long call() throws AlluxioException {
-        return mFileSystemMaster.getNewBlockIdForFile(new AlluxioURI(path));
-      }
-    });
+  public void getFilePath(GetFilePathPRequest request,
+      StreamObserver<GetFilePathPResponse> responseObserver) {
+    long fileId = request.getFileId();
+    RpcUtils.call(LOG,
+        (RpcUtils.RpcCallableThrowsIOException<GetFilePathPResponse>) () -> GetFilePathPResponse
+            .newBuilder()
+            .setPath(mFileSystemMaster.getPath(fileId).toString())
+            .build(),
+        "GetFilePath", true, "id=%s", responseObserver, fileId);
   }
 
   @Override
-  public FileInfo getStatus(final String path) throws AlluxioTException {
-    return RpcUtils.call(new RpcCallable<FileInfo>() {
-      @Override
-      public FileInfo call() throws AlluxioException {
-        return ThriftUtils.toThrift(mFileSystemMaster.getFileInfo(new AlluxioURI(path)));
-      }
-    });
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @deprecated since version 1.1 and will be removed in version 2.0
-   */
-  @Override
-  @Deprecated
-  public FileInfo getStatusInternal(final long fileId) throws AlluxioTException {
-    return RpcUtils.call(new RpcCallable<FileInfo>() {
-      @Override
-      public FileInfo call() throws AlluxioException {
-        return ThriftUtils.toThrift(mFileSystemMaster.getFileInfo(fileId));
-      }
-    });
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @deprecated since version 1.1 and will be removed in version 2.0
-   */
-  @Override
-  @Deprecated
-  public String getUfsAddress() throws AlluxioTException {
-    return RpcUtils.call(new RpcCallable<String>() {
-      @Override
-      public String call() throws AlluxioException {
-        return mFileSystemMaster.getUfsAddress();
-      }
-    });
+  public void getStatus(GetStatusPRequest request,
+      StreamObserver<GetStatusPResponse> responseObserver) {
+    String path = request.getPath();
+    GetStatusPOptions options = request.getOptions();
+    RpcUtils.call(LOG,
+        (RpcUtils.RpcCallableThrowsIOException<GetStatusPResponse>) () -> GetStatusPResponse
+            .newBuilder()
+            .setFileInfo(GrpcUtils.toProto(mFileSystemMaster.getFileInfo(new AlluxioURI(path),
+                GetStatusContext.create(options.toBuilder()))))
+            .build(),
+        "GetStatus", true, "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public List<FileInfo> listStatus(final String path, final ListStatusTOptions options)
-      throws AlluxioTException {
-    return RpcUtils.call(new RpcCallable<List<FileInfo>>() {
-      @Override
-      public List<FileInfo> call() throws AlluxioException {
-        List<FileInfo> result = new ArrayList<>();
-        for (alluxio.wire.FileInfo fileInfo : mFileSystemMaster
-            .listStatus(new AlluxioURI(path), new ListStatusOptions(options))) {
-          result.add(ThriftUtils.toThrift(fileInfo));
-        }
-        return result;
+  public void listStatus(ListStatusPRequest request,
+      StreamObserver<ListStatusPResponse> responseObserver) {
+    String path = request.getPath();
+    ListStatusPOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<ListStatusPResponse>) () -> {
+      List<FileInfo> result = new ArrayList<>();
+      for (alluxio.wire.FileInfo fileInfo : mFileSystemMaster.listStatus(new AlluxioURI(path),
+          ListStatusContext.create(options.toBuilder()))) {
+        result.add(GrpcUtils.toProto(fileInfo));
       }
-    });
-  }
-
-  /**
-   * {@inheritDoc}
-   *
-   * @deprecated since version 1.1 and will be removed in version 2.0
-   */
-  @Override
-  @Deprecated
-  public long loadMetadata(final String alluxioPath, final boolean recursive)
-      throws AlluxioTException, ThriftIOException {
-    return RpcUtils.call(new RpcCallableThrowsIOException<Long>() {
-      @Override
-      public Long call() throws AlluxioException, IOException {
-        return mFileSystemMaster.loadMetadata(new AlluxioURI(alluxioPath),
-            LoadMetadataOptions.defaults().setCreateAncestors(true).setLoadDirectChildren(true));
-      }
-    });
+      return ListStatusPResponse.newBuilder().addAllFileInfos(result).build();
+    }, "ListStatus", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public void mount(final String alluxioPath, final String ufsPath, final MountTOptions options)
-      throws AlluxioTException, ThriftIOException {
-    RpcUtils.call(new RpcCallableThrowsIOException<Void>() {
-      @Override
-      public Void call() throws AlluxioException, IOException {
-        mFileSystemMaster.mount(new AlluxioURI(alluxioPath), new AlluxioURI(ufsPath),
-            new MountOptions(options));
-        return null;
-      }
-    });
+  public void mount(MountPRequest request, StreamObserver<MountPResponse> responseObserver) {
+    String alluxioPath = request.getAlluxioPath();
+    String ufsPath = request.getUfsPath();
+    MountPOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<MountPResponse>) () -> {
+      mFileSystemMaster.mount(new AlluxioURI(alluxioPath), new AlluxioURI(ufsPath),
+          MountContext.create(options.toBuilder()));
+      return MountPResponse.newBuilder().build();
+    }, "Mount", "alluxioPath=%s, ufsPath=%s, options=%s", responseObserver, alluxioPath, ufsPath,
+        options);
   }
 
   @Override
-  public void remove(final String path, final boolean recursive)
-      throws AlluxioTException, ThriftIOException {
-    RpcUtils.call(new RpcCallableThrowsIOException<Void>() {
-      @Override
-      public Void call() throws AlluxioException, IOException {
-        mFileSystemMaster.delete(new AlluxioURI(path), recursive);
-        return null;
+  public void getMountTable(GetMountTablePRequest request,
+      StreamObserver<GetMountTablePResponse> responseObserver) {
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<GetMountTablePResponse>) () -> {
+      Map<String, MountPointInfo> mountTableWire = mFileSystemMaster.getMountTable();
+      Map<String, alluxio.grpc.MountPointInfo> mountTableProto = new HashMap<>();
+      for (Map.Entry<String, MountPointInfo> entry : mountTableWire.entrySet()) {
+        mountTableProto.put(entry.getKey(), GrpcUtils.toProto(entry.getValue()));
       }
-    });
+      return GetMountTablePResponse.newBuilder().putAllMountPoints(mountTableProto).build();
+    }, "GetMountTable", "", responseObserver);
   }
 
   @Override
-  public void rename(final String srcPath, final String dstPath)
-      throws AlluxioTException, ThriftIOException {
-    RpcUtils.call(new RpcCallableThrowsIOException<Void>() {
-      @Override
-      public Void call() throws AlluxioException, IOException {
-        mFileSystemMaster
-            .rename(new AlluxioURI(srcPath), new AlluxioURI(dstPath), RenameOptions.defaults());
-        return null;
-      }
-    });
+  public void getSyncPathList(GetSyncPathListPRequest request,
+      StreamObserver<GetSyncPathListPResponse> responseObserver) {
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<GetSyncPathListPResponse>) () -> {
+      List<SyncPointInfo> pathList = mFileSystemMaster.getSyncPathList();
+      List<alluxio.grpc.SyncPointInfo> syncPointInfoList =
+          pathList.stream().map(SyncPointInfo::toProto).collect(Collectors.toList());
+      return GetSyncPathListPResponse.newBuilder().addAllSyncPaths(syncPointInfoList).build();
+    }, "getSyncPathList", "request", responseObserver, request);
   }
 
   @Override
-  public void scheduleAsyncPersist(final String path) throws AlluxioTException {
-    RpcUtils.call(new RpcCallable<Void>() {
-      @Override
-      public Void call() throws AlluxioException {
-        mFileSystemMaster.scheduleAsyncPersistence(new AlluxioURI(path));
-        return null;
-      }
-    });
-  }
-
-  // TODO(calvin): Do not rely on client side options
-  @Override
-  public void setAttribute(final String path, final SetAttributeTOptions options)
-      throws AlluxioTException {
-    RpcUtils.call(new RpcCallable<Void>() {
-      @Override
-      public Void call() throws AlluxioException {
-          mFileSystemMaster.setAttribute(new AlluxioURI(path), new SetAttributeOptions(options));
-          return null;
-      }
-    });
+  public void remove(DeletePRequest request, StreamObserver<DeletePResponse> responseObserver) {
+    String path = request.getPath();
+    DeletePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<DeletePResponse>) () -> {
+      mFileSystemMaster.delete(new AlluxioURI(path), DeleteContext.create(options.toBuilder()));
+      return DeletePResponse.newBuilder().build();
+    }, "Remove", "path=%s, options=%s", responseObserver, path, options);
   }
 
   @Override
-  public void unmount(final String alluxioPath) throws AlluxioTException, ThriftIOException {
-    RpcUtils.call(new RpcCallableThrowsIOException<Void>() {
-      @Override
-      public Void call() throws AlluxioException, IOException {
-        mFileSystemMaster.unmount(new AlluxioURI(alluxioPath));
-        return null;
+  public void rename(RenamePRequest request, StreamObserver<RenamePResponse> responseObserver) {
+    String srcPath = request.getPath();
+    String dstPath = request.getDstPath();
+    RenamePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<RenamePResponse>) () -> {
+      mFileSystemMaster.rename(new AlluxioURI(srcPath), new AlluxioURI(dstPath),
+          RenameContext.create(options.toBuilder()));
+      return RenamePResponse.newBuilder().build();
+    }, "Rename", "srcPath=%s, dstPath=%s, options=%s", responseObserver, srcPath, dstPath, options);
+  }
+
+  @Override
+  public void scheduleAsyncPersistence(ScheduleAsyncPersistencePRequest request,
+      StreamObserver<ScheduleAsyncPersistencePResponse> responseObserver) {
+    String path = request.getPath();
+    ScheduleAsyncPersistencePOptions options = request.getOptions();
+    RpcUtils.call(LOG,
+        (RpcUtils.RpcCallableThrowsIOException<ScheduleAsyncPersistencePResponse>) () -> {
+          mFileSystemMaster.scheduleAsyncPersistence(new AlluxioURI(path));
+          return ScheduleAsyncPersistencePResponse.newBuilder().build();
+        }, "ScheduleAsyncPersist", "path=%s, options=%s", responseObserver, path, options);
+  }
+
+  @Override
+  public void setAttribute(SetAttributePRequest request,
+      StreamObserver<SetAttributePResponse> responseObserver) {
+    String path = request.getPath();
+    SetAttributePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<SetAttributePResponse>) () -> {
+      mFileSystemMaster.setAttribute(new AlluxioURI(path),
+          SetAttributeContext.create(options.toBuilder()));
+      return SetAttributePResponse.newBuilder().build();
+    }, "SetAttribute", "path=%s, options=%s", responseObserver, path, options);
+  }
+
+  @Override
+  public void startSync(StartSyncPRequest request,
+      StreamObserver<StartSyncPResponse> responseObserver) {
+    String path = request.getPath();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<StartSyncPResponse>) () -> {
+      mFileSystemMaster.startSync(new AlluxioURI(path));
+      return StartSyncPResponse.newBuilder().build();
+    }, "startSync", "request=%s", responseObserver, request);
+  }
+
+  @Override
+  public void stopSync(StopSyncPRequest request,
+      StreamObserver<StopSyncPResponse> responseObserver) {
+    String path = request.getPath();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<StopSyncPResponse>) () -> {
+      mFileSystemMaster.stopSync(new AlluxioURI(path));
+      return StopSyncPResponse.newBuilder().build();
+    }, "stopSync", "request=%s", responseObserver, request);
+  }
+
+  @Override
+  public void unmount(UnmountPRequest request, StreamObserver<UnmountPResponse> responseObserver) {
+    String alluxioPath = request.getAlluxioPath();
+    UnmountPOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<UnmountPResponse>) () -> {
+      mFileSystemMaster.unmount(new AlluxioURI(alluxioPath));
+      return UnmountPResponse.newBuilder().build();
+    }, "Unmount", "alluxioPath=%s, options=%s", responseObserver, alluxioPath, options);
+  }
+
+  @Override
+  public void updateUfsMode(UpdateUfsModePRequest request,
+      StreamObserver<UpdateUfsModePResponse> responseObserver) {
+    String ufsPath = request.getUfsPath();
+    UpdateUfsModePOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<UpdateUfsModePResponse>) () -> {
+      UfsMode ufsMode;
+      switch (options.getUfsMode()) {
+        case NO_ACCESS:
+          ufsMode = UfsMode.NO_ACCESS;
+          break;
+        case READ_ONLY:
+          ufsMode = UfsMode.READ_ONLY;
+          break;
+        default:
+          ufsMode = UfsMode.READ_WRITE;
+          break;
       }
-    });
+      mFileSystemMaster.updateUfsMode(new AlluxioURI(ufsPath), ufsMode);
+      return UpdateUfsModePResponse.newBuilder().build();
+    }, "UpdateUfsMode", "ufsPath=%s, options=%s", responseObserver, ufsPath, options);
+  }
+
+  @Override
+  public void setAcl(SetAclPRequest request,
+                     StreamObserver<SetAclPResponse> responseObserver) {
+    String alluxioPath = request.getPath();
+    SetAclAction aclAction = request.getAction();
+    List<PAclEntry> aclList = request.getEntriesList();
+    SetAclPOptions options = request.getOptions();
+    RpcUtils.call(LOG, (RpcUtils.RpcCallableThrowsIOException<SetAclPResponse>) () -> {
+      mFileSystemMaster.setAcl(new AlluxioURI(alluxioPath), aclAction,
+          aclList.stream().map(GrpcUtils::fromProto).collect(Collectors.toList()),
+          SetAclContext.create(options.toBuilder()));
+      return SetAclPResponse.newBuilder().build();
+    }, "setAcl", "alluxioPath=%s, setAclAction=%s, aclEntries=%s, options=%s", responseObserver,
+        alluxioPath, aclAction.name(), aclList, options);
   }
 }

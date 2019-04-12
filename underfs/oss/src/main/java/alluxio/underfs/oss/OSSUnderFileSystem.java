@@ -12,12 +12,14 @@
 package alluxio.underfs.oss;
 
 import alluxio.AlluxioURI;
-import alluxio.Configuration;
 import alluxio.Constants;
-import alluxio.PropertyKey;
+import alluxio.conf.AlluxioConfiguration;
+import alluxio.conf.PropertyKey;
 import alluxio.underfs.ObjectUnderFileSystem;
 import alluxio.underfs.UnderFileSystem;
+import alluxio.underfs.UnderFileSystemConfiguration;
 import alluxio.underfs.options.OpenOptions;
+import alluxio.util.UnderFileSystemUtils;
 import alluxio.util.io.PathUtils;
 
 import com.aliyun.oss.ClientConfiguration;
@@ -44,7 +46,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public class OSSUnderFileSystem extends ObjectUnderFileSystem {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(OSSUnderFileSystem.class);
 
   /** Suffix for an empty file to flag it as a directory. */
   private static final String FOLDER_SUFFIX = "_$folder$";
@@ -59,25 +61,27 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
    * Constructs a new instance of {@link OSSUnderFileSystem}.
    *
    * @param uri the {@link AlluxioURI} for this UFS
+   * @param conf the configuration for this UFS
+   * @param alluxioConf Alluxio configuration
    * @return the created {@link OSSUnderFileSystem} instance
-   * @throws Exception when a connection to GCS could not be created
    */
-  public static OSSUnderFileSystem createInstance(AlluxioURI uri) throws Exception {
-    String bucketName = uri.getHost();
-    Preconditions.checkArgument(Configuration.containsKey(PropertyKey.OSS_ACCESS_KEY),
-        "Property " + PropertyKey.OSS_ACCESS_KEY + " is required to connect to OSS");
-    Preconditions.checkArgument(Configuration.containsKey(PropertyKey.OSS_SECRET_KEY),
-        "Property " + PropertyKey.OSS_SECRET_KEY + " is required to connect to OSS");
-    Preconditions.checkArgument(Configuration.containsKey(PropertyKey.OSS_ENDPOINT_KEY),
-        "Property " + PropertyKey.OSS_ENDPOINT_KEY + " is required to connect to OSS");
-    String accessId = Configuration.get(PropertyKey.OSS_ACCESS_KEY);
-    String accessKey = Configuration.get(PropertyKey.OSS_SECRET_KEY);
-    String endPoint = Configuration.get(PropertyKey.OSS_ENDPOINT_KEY);
+  public static OSSUnderFileSystem createInstance(AlluxioURI uri,
+      UnderFileSystemConfiguration conf, AlluxioConfiguration alluxioConf) throws Exception {
+    String bucketName = UnderFileSystemUtils.getBucketName(uri);
+    Preconditions.checkArgument(conf.isSet(PropertyKey.OSS_ACCESS_KEY),
+        "Property %s is required to connect to OSS", PropertyKey.OSS_ACCESS_KEY);
+    Preconditions.checkArgument(conf.isSet(PropertyKey.OSS_SECRET_KEY),
+        "Property %s is required to connect to OSS", PropertyKey.OSS_SECRET_KEY);
+    Preconditions.checkArgument(conf.isSet(PropertyKey.OSS_ENDPOINT_KEY),
+        "Property %s is required to connect to OSS", PropertyKey.OSS_ENDPOINT_KEY);
+    String accessId = conf.get(PropertyKey.OSS_ACCESS_KEY);
+    String accessKey = conf.get(PropertyKey.OSS_SECRET_KEY);
+    String endPoint = conf.get(PropertyKey.OSS_ENDPOINT_KEY);
 
-    ClientConfiguration ossClientConf = initializeOSSClientConfig();
+    ClientConfiguration ossClientConf = initializeOSSClientConfig(alluxioConf);
     OSSClient ossClient = new OSSClient(endPoint, accessId, accessKey, ossClientConf);
 
-    return new OSSUnderFileSystem(uri, ossClient, bucketName);
+    return new OSSUnderFileSystem(uri, ossClient, bucketName, conf, alluxioConf);
   }
 
   /**
@@ -86,11 +90,11 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
    * @param uri the {@link AlluxioURI} for this UFS
    * @param ossClient Aliyun OSS client
    * @param bucketName bucket name of user's configured Alluxio bucket
+   * @param conf configuration for this UFS
    */
-  protected OSSUnderFileSystem(AlluxioURI uri,
-      OSSClient ossClient,
-      String bucketName) {
-    super(uri);
+  protected OSSUnderFileSystem(AlluxioURI uri, OSSClient ossClient, String bucketName,
+      UnderFileSystemConfiguration conf, AlluxioConfiguration alluxioConf) {
+    super(uri, conf, alluxioConf);
     mClient = ossClient;
     mBucketName = bucketName;
   }
@@ -108,28 +112,10 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
   @Override
   public void setMode(String path, short mode) throws IOException {}
 
-  // No ACL integration currently, returns default empty value
-  @Override
-  public String getOwner(String path) throws IOException {
-    return "";
-  }
-
-  // No ACL integration currently, returns default empty value
-  @Override
-  public String getGroup(String path) throws IOException {
-    return "";
-  }
-
-  // No ACL integration currently, returns default value
-  @Override
-  public short getMode(String path) throws IOException {
-    return Constants.DEFAULT_FILE_SYSTEM_MODE;
-  }
-
   @Override
   protected boolean copyObject(String src, String dst) {
+    LOG.debug("Copying {} to {}", src, dst);
     try {
-      LOG.info("Copying {} to {}", src, dst);
       mClient.copyObject(mBucketName, src, mBucketName, dst);
       return true;
     } catch (ServiceException e) {
@@ -153,7 +139,8 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
 
   @Override
   protected OutputStream createObject(String key) throws IOException {
-    return new OSSOutputStream(mBucketName, key, mClient);
+    return new OSSOutputStream(mBucketName, key, mClient,
+        mAlluxioConf.getList(PropertyKey.TMP_DIRS, ","));
   }
 
   @Override
@@ -181,7 +168,7 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
     key = key.equals(PATH_SEPARATOR) ? "" : key;
     ListObjectsRequest request = new ListObjectsRequest(mBucketName);
     request.setPrefix(key);
-    request.setMaxKeys(getListingChunkLength());
+    request.setMaxKeys(getListingChunkLength(mAlluxioConf));
     request.setDelimiter(delimiter);
 
     ObjectListing result = getObjectListingChunk(request);
@@ -204,14 +191,13 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
   }
 
   /**
-   * Wrapper over OSS {@link StorageObjectsChunk}.
+   * Wrapper over OSS {@link ObjectListingChunk}.
    */
   private final class OSSObjectListingChunk implements ObjectListingChunk {
     final ListObjectsRequest mRequest;
     final ObjectListing mResult;
 
-    OSSObjectListingChunk(ListObjectsRequest request, ObjectListing result)
-        throws IOException {
+    OSSObjectListingChunk(ListObjectsRequest request, ObjectListing result) throws IOException {
       mRequest = request;
       mResult = result;
       if (mResult == null) {
@@ -220,12 +206,13 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
     }
 
     @Override
-    public String[] getObjectNames() {
+    public ObjectStatus[] getObjectStatuses() {
       List<OSSObjectSummary> objects = mResult.getObjectSummaries();
-      String[] ret = new String[objects.size()];
+      ObjectStatus[] ret = new ObjectStatus[objects.size()];
       int i = 0;
       for (OSSObjectSummary obj : objects) {
-        ret[i++] = obj.getKey();
+        ret[i++] = new ObjectStatus(obj.getKey(), obj.getETag(), obj.getSize(),
+            obj.getLastModified().getTime());
       }
       return ret;
     }
@@ -239,6 +226,7 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
     @Override
     public ObjectListingChunk getNextChunk() throws IOException {
       if (mResult.isTruncated()) {
+        mRequest.setMarker(mResult.getNextMarker());
         ObjectListing nextResult = mClient.listObjects(mRequest);
         if (nextResult != null) {
           return new OSSObjectListingChunk(mRequest, nextResult);
@@ -255,11 +243,18 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
       if (meta == null) {
         return null;
       }
-      return new ObjectStatus(meta.getContentLength(), meta.getLastModified().getTime());
+      return new ObjectStatus(key, meta.getETag(), meta.getContentLength(),
+          meta.getLastModified().getTime());
     } catch (ServiceException e) {
       LOG.warn("Failed to get Object {}, return null", key, e);
       return null;
     }
+  }
+
+  // No ACL integration currently, returns default empty value
+  @Override
+  protected ObjectPermissions getPermissions() {
+    return new ObjectPermissions("", "", Constants.DEFAULT_FILE_SYSTEM_MODE);
   }
 
   @Override
@@ -272,21 +267,22 @@ public class OSSUnderFileSystem extends ObjectUnderFileSystem {
    *
    * @return the OSS {@link ClientConfiguration}
    */
-  private static ClientConfiguration initializeOSSClientConfig() {
+  private static ClientConfiguration initializeOSSClientConfig(AlluxioConfiguration alluxioConf) {
     ClientConfiguration ossClientConf = new ClientConfiguration();
-    ossClientConf.setConnectionTimeout(
-        Configuration.getInt(PropertyKey.UNDERFS_OSS_CONNECT_TIMEOUT));
-    ossClientConf.setSocketTimeout(
-        Configuration.getInt(PropertyKey.UNDERFS_OSS_SOCKET_TIMEOUT));
-    ossClientConf.setConnectionTTL(Configuration.getLong(PropertyKey.UNDERFS_OSS_CONNECT_TTL));
-    ossClientConf.setMaxConnections(Configuration.getInt(PropertyKey.UNDERFS_OSS_CONNECT_MAX));
+    ossClientConf
+        .setConnectionTimeout((int) alluxioConf.getMs(PropertyKey.UNDERFS_OSS_CONNECT_TIMEOUT));
+    ossClientConf
+        .setSocketTimeout((int) alluxioConf.getMs(PropertyKey.UNDERFS_OSS_SOCKET_TIMEOUT));
+    ossClientConf.setConnectionTTL(alluxioConf.getLong(PropertyKey.UNDERFS_OSS_CONNECT_TTL));
+    ossClientConf.setMaxConnections(alluxioConf.getInt(PropertyKey.UNDERFS_OSS_CONNECT_MAX));
     return ossClientConf;
   }
 
   @Override
   protected InputStream openObject(String key, OpenOptions options) throws IOException {
     try {
-      return new OSSInputStream(mBucketName, key, mClient, options.getOffset());
+      return new OSSInputStream(mBucketName, key, mClient, options.getOffset(),
+          mAlluxioConf.getBytes(PropertyKey.UNDERFS_OBJECT_STORE_MULTI_RANGE_CHUNK_SIZE));
     } catch (ServiceException e) {
       throw new IOException(e.getMessage());
     }

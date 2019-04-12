@@ -12,14 +12,15 @@
 package alluxio.master;
 
 import alluxio.client.file.FileSystem;
-
-import com.google.common.base.Supplier;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.ServerConfiguration;
 
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Supplier;
 
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -39,10 +40,22 @@ public final class ClientPool implements Closeable {
    * closed directly, but can be closed by calling {@link #close()} on this object.
    *
    * @return a {@link FileSystem} client
-   * @throws IOException when the operation fails
    */
   public FileSystem getClient() throws IOException {
-    final FileSystem fs = FileSystem.Factory.get();
+    final FileSystem fs = FileSystem.Factory.create(ServerConfiguration.global());
+    mClients.add(fs);
+    return fs;
+  }
+
+  /**
+   * Returns a {@link FileSystem} client using a specific context. This client does not need to be
+   * closed directly, but can be closed by calling {@link #close()} on this object.
+   *
+   * @param context the FileSystemContext to use
+   * @return a {@link FileSystem} client
+   */
+  public FileSystem getClient(FileSystemContext context) throws IOException {
+    final FileSystem fs = FileSystem.Factory.create(context);
     mClients.add(fs);
     return fs;
   }
@@ -50,6 +63,13 @@ public final class ClientPool implements Closeable {
   @Override
   public void close() throws IOException {
     synchronized (mClients) {
+      mClients.forEach((client) -> {
+        try {
+          client.close();
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        }
+      });
       mClients.clear();
     }
   }

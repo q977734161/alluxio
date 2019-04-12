@@ -11,14 +11,23 @@
 
 package alluxio.fuse;
 
-import alluxio.Constants;
+import alluxio.exception.AccessControlException;
+import alluxio.exception.AlluxioException;
+import alluxio.exception.BlockDoesNotExistException;
+import alluxio.exception.ConnectionFailedException;
+import alluxio.exception.DirectoryNotEmptyException;
+import alluxio.exception.FileAlreadyCompletedException;
+import alluxio.exception.FileAlreadyExistsException;
+import alluxio.exception.FileDoesNotExistException;
+import alluxio.exception.InvalidPathException;
+import alluxio.util.OSUtils;
+import alluxio.util.ShellUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import ru.serce.jnrfuse.ErrorCodes;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 
 import javax.annotation.concurrent.ThreadSafe;
 
@@ -27,52 +36,176 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class AlluxioFuseUtils {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(AlluxioFuseUtils.class);
 
   private AlluxioFuseUtils() {}
 
   /**
-   * Retrieves the uid and primary gid of the user running Alluxio-FUSE.
-   * @return a long[2] array {uid, gid}
+   * Retrieves the uid of the given user.
+   *
+   * @param userName the user name
+   * @return uid
    */
-  public static long[] getUidAndGid() {
-    final String uname = System.getProperty("user.name");
-    final long uid = getIdInfo("-u", uname);
-    final long gid = getIdInfo("-g", uname);
-    return new long[] {uid, gid};
+  public static long getUid(String userName) {
+    return getIdInfo("-u", userName);
+  }
+
+  /**
+   * Retrieves the primary gid of the given user.
+   *
+   * @param userName the user name
+   * @return gid
+   */
+  public static long getGid(String userName) {
+    return getIdInfo("-g", userName);
+  }
+
+  /**
+   * Retrieves the gid of the given group.
+   *
+   * @param groupName the group name
+   * @return gid
+   */
+  public static long getGidFromGroupName(String groupName) throws IOException {
+    String result = "";
+    if (OSUtils.isLinux()) {
+      String script = "getent group " + groupName + " | cut -d: -f3";
+      result = ShellUtils.execCommand("bash", "-c", script).trim();
+    } else if (OSUtils.isMacOS()) {
+      String script = "dscl . -read /Groups/" + groupName
+          + " | awk '($1 == \"PrimaryGroupID:\") { print $2 }'";
+      result = ShellUtils.execCommand("bash", "-c", script).trim();
+    }
+    try {
+      return Long.parseLong(result);
+    } catch (NumberFormatException e) {
+      LOG.error("Failed to get gid from group name {}.", groupName);
+      return -1;
+    }
+  }
+
+  /**
+   * Gets the user name from the user id.
+   *
+   * @param uid user id
+   * @return user name
+   */
+  public static String getUserName(long uid) throws IOException {
+    return ShellUtils.execCommand("id", "-nu", Long.toString(uid)).trim();
+  }
+
+  /**
+   * Gets the primary group name from the user name.
+   *
+   * @param userName the user name
+   * @return group name
+   */
+  public static String getGroupName(String userName) throws IOException {
+    return ShellUtils.execCommand("id", "-ng", userName).trim();
+  }
+
+  /**
+   * Gets the group name from the group id.
+   *
+   * @param gid the group id
+   * @return group name
+   */
+  public static String getGroupName(long gid) throws IOException {
+    if (OSUtils.isLinux()) {
+      String script = "getent group " + gid + " | cut -d: -f1";
+      return ShellUtils.execCommand("bash", "-c", script).trim();
+    } else if (OSUtils.isMacOS()) {
+      String script = "dscl . list /Groups PrimaryGroupID | awk '($2 == \""
+          + gid + "\") { print $1 }'";
+      return ShellUtils.execCommand("bash", "-c", script).trim();
+    }
+    return "";
+  }
+
+  /**
+   * Checks whether fuse is installed in local file system.
+   * Alluxio-Fuse only support mac and linux.
+   *
+   * @return true if fuse is installed, false otherwise
+   */
+  public static boolean isFuseInstalled() {
+    try {
+      if (OSUtils.isLinux()) {
+        String result = ShellUtils.execCommand("fusermount", "-V");
+        return !result.isEmpty();
+      } else if (OSUtils.isMacOS()) {
+        String result = ShellUtils.execCommand("bash", "-c", "mount | grep FUSE");
+        return !result.isEmpty();
+      }
+    } catch (Exception e) {
+      return false;
+    }
+    return false;
   }
 
   /**
    * Runs the "id" command with the given options on the passed username.
+   *
    * @param option option to pass to id (either -u or -g)
    * @param username the username on which to run the command
    * @return the uid (-u) or gid (-g) of username
    */
   private static long getIdInfo(String option, String username) {
-    BufferedReader br = null;
+    String output;
     try {
-      final Process idProc = new ProcessBuilder().command("id", option, username).start();
-      br = new BufferedReader(new InputStreamReader(idProc.getInputStream()));
-      // expect only one line output
-      final String out = br.readLine();
-      if (idProc.waitFor() == 0) {
-        return Long.parseLong(out);
-      } else {
-        LOG.error("id {} {} completed with error", option, username);
-      }
+      output = ShellUtils.execCommand("id", option, username).trim();
     } catch (IOException e) {
-      LOG.error("Cannot execute: id {} {}", option, username, e);
-    } catch (InterruptedException e) {
-      LOG.error("Interrupted while waiting: id {} {}", option, username, e);
-    } finally {
-      if (br != null) {
-        try {
-          br.close();
-        } catch (IOException e) {
-          LOG.warn("Exception while closing Process output reader", e);
-        }
-      }
+      LOG.error("Failed to get id from {} with option {}", username, option);
+      return -1;
     }
-    return -1;
+    return Long.parseLong(output);
+  }
+
+  /**
+   * Gets the corresponding error code of a throwable.
+   *
+   * @param t throwable
+   * @return the corresponding error code
+   */
+  public static int getErrorCode(Throwable t) {
+    // Error codes and their explanations are described in
+    // the Errno.java in jnr-constants
+    if (t instanceof AlluxioException) {
+      return getAlluxioErrorCode((AlluxioException) t);
+    } else if (t instanceof IOException) {
+      return -ErrorCodes.EIO();
+    } else {
+      return -ErrorCodes.EBADMSG();
+    }
+  }
+
+  /**
+   * Gets the corresponding error code of an Alluxio exception.
+   *
+   * @param e an Alluxio exception
+   * @return the corresponding error code
+   */
+  private static int getAlluxioErrorCode(AlluxioException e) {
+    try {
+      throw e;
+    } catch (FileDoesNotExistException ex) {
+      return -ErrorCodes.ENOENT();
+    } catch (FileAlreadyExistsException ex) {
+      return -ErrorCodes.EEXIST();
+    } catch (InvalidPathException ex) {
+      return -ErrorCodes.EFAULT();
+    } catch (BlockDoesNotExistException ex) {
+      return -ErrorCodes.ENODATA();
+    } catch (DirectoryNotEmptyException ex) {
+      return -ErrorCodes.ENOTEMPTY();
+    } catch (AccessControlException ex) {
+      return -ErrorCodes.EACCES();
+    } catch (ConnectionFailedException ex) {
+      return -ErrorCodes.ECONNREFUSED();
+    } catch (FileAlreadyCompletedException ex) {
+      return -ErrorCodes.EOPNOTSUPP();
+    } catch (AlluxioException ex) {
+      return -ErrorCodes.EBADMSG();
+    }
   }
 }

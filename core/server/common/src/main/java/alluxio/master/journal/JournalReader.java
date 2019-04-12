@@ -11,123 +11,72 @@
 
 package alluxio.master.journal;
 
-import alluxio.Constants;
-import alluxio.underfs.UnderFileSystem;
+import alluxio.master.journal.checkpoint.CheckpointInputStream;
+import alluxio.proto.journal.Journal.JournalEntry;
 
-import com.google.common.base.Preconditions;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import java.io.Closeable;
 import java.io.IOException;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
 /**
- * This class manages reading from the journal. The reading must occur in two phases:
- *
- * 1. First, the checkpoint file must be read.
- *
- * 2. Afterwards, completed entries are read in order. Only completed logs are read, so the last log
- * currently being written is not read until it is marked as complete.
+ * This class manages reading from the journal.
  */
 @NotThreadSafe
-public class JournalReader {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
-
-  private final Journal mJournal;
-  /** The UFS where the journal is being written to. */
-  private final UnderFileSystem mUfs;
-  /** Absolute path for the journal checkpoint file. */
-  private final String mCheckpointPath;
-
-  /** true if the checkpoint has already been read. */
-  private boolean mCheckpointRead = false;
-  /** The modified time (in ms) for the opened checkpoint file. */
-  private long mCheckpointOpenedTime = -1;
-  /** The modified time (in ms) for the latest checkpoint file. */
-  private long mCheckpointLastModifiedTime = -1;
-  /** The log number for the completed log file. */
-  private long mCurrentLogNumber = Journal.FIRST_COMPLETED_LOG_NUMBER;
-
+public interface JournalReader extends Closeable {
   /**
-   * Creates a new instance of {@link JournalReader}.
+   * Returns the next entry in the journal.
    *
-   * @param journal the handle to the journal
-   */
-  JournalReader(Journal journal) {
-    mJournal = Preconditions.checkNotNull(journal, "journal");
-    mUfs = UnderFileSystem.Factory.get(mJournal.getDirectory());
-    mCheckpointPath = mJournal.getCheckpointFilePath();
-  }
-
-  /**
-   * Checks to see if the journal checkpoint has not been updated. If it has been updated since the
-   * creation of this reader, this reader is no longer valid.
+   * This will be null unless the last call to {@link #advance()} returned {@link State#LOG}.
+   * Multiple calls to getEntry without calling advance will return the same entry.
    *
-   * @return true if the checkpoint file has not been modified
+   * @return the journal entry, or null if the next element isn't a journal entry
    */
-  public boolean isValid() {
-    return mCheckpointRead && (mCheckpointOpenedTime == mCheckpointLastModifiedTime);
-  }
+  JournalEntry getEntry();
 
   /**
-   * Gets the {@link JournalInputStream} for the journal checkpoint file. This must be called before
-   * calling {@link #getNextInputStream()}.
+   * Returns the input stream for reading a checkpoint.
    *
-   * @return the {@link JournalInputStream} for the journal checkpoint file
-   * @throws IOException if the checkpoint file cannot be read, or was already read
+   * This will be null unless the last call to {@link #advance()} returned {@link State#CHECKPOINT}.
+   * Multiple calls to getCheckpoint without calling advance will return the same stream.
+   *
+   * @return the input stream for reading the checkpoint, or null if the next element isn't a
+   *         checkpoint
    */
-  public JournalInputStream getCheckpointInputStream() throws IOException {
-    if (mCheckpointRead) {
-      throw new IOException("Checkpoint file has already been read.");
-    }
-    mCheckpointOpenedTime = getCheckpointLastModifiedTimeMs();
-
-    LOG.info("Opening journal checkpoint file: {}", mCheckpointPath);
-    JournalInputStream jis =
-        mJournal.getJournalFormatter().deserialize(mUfs.open(mCheckpointPath));
-
-    mCheckpointRead = true;
-    return jis;
-  }
+  CheckpointInputStream getCheckpoint();
 
   /**
-   * @return the input stream for the next completed log file. Will return null if the next
-   *         completed log file does not exist yet.
-   * @throws IOException if the reader is no longer valid or when trying to get an input stream
-   *                     before a checkpoint was read
+   * Gets the the sequence number of the next journal log entry to read. This method is valid
+   * no matter whether this JournalReader is closed or not.
+   *
+   * @return the next sequence number
    */
-  public JournalInputStream getNextInputStream() throws IOException {
-    if (!mCheckpointRead) {
-      throw new IOException("Must read the checkpoint file before getting input stream.");
-    }
-    if (getCheckpointLastModifiedTimeMs() != mCheckpointOpenedTime) {
-      throw new IOException("Checkpoint file has been updated. This reader is no longer valid.");
-    }
-    String currentLogPath = mJournal.getCompletedLogFilePath(mCurrentLogNumber);
-    if (!mUfs.isFile(currentLogPath)) {
-      LOG.debug("Journal log file: {} does not exist yet.", currentLogPath);
-      return null;
-    }
-    // Open input stream from the current log file.
-    LOG.info("Opening journal log file: {}", currentLogPath);
-    JournalInputStream jis =
-        mJournal.getJournalFormatter().deserialize(mUfs.open(currentLogPath));
-
-    // Increment the log file number.
-    mCurrentLogNumber++;
-    return jis;
-  }
+  long getNextSequenceNumber();
 
   /**
-   * @return the last modified time of the checkpoint file in ms
-   * @throws IOException if the checkpoint does not exist
+   * Advances the reader to the next element.
+   *
+   * @return the next element, see {@link State}
    */
-  public long getCheckpointLastModifiedTimeMs() throws IOException {
-    if (!mUfs.isFile(mCheckpointPath)) {
-      throw new IOException("Checkpoint file " + mCheckpointPath + " does not exist.");
-    }
-    mCheckpointLastModifiedTime = mUfs.getModificationTimeMs(mCheckpointPath);
-    return mCheckpointLastModifiedTime;
+  State advance() throws IOException;
+
+  /**
+   * States that the reader can be after calling {@link #advance()}.
+   */
+  enum State {
+    /**
+     * Indicates that the next item to process is a checkpoint. The caller should call
+     * {@link #getCheckpoint()}.
+     */
+    CHECKPOINT,
+    /**
+     * Indicates that the next item to process is an edit log. The caller should call
+     * {@link #getEntry()}.
+     */
+    LOG,
+    /**
+     * Indicates that there is nothing left to read.
+     */
+    DONE
   }
 }

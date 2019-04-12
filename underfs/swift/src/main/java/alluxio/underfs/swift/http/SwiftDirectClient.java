@@ -11,7 +11,6 @@
 
 package alluxio.underfs.swift.http;
 
-import alluxio.Constants;
 import alluxio.underfs.swift.SwiftOutputStream;
 
 import org.javaswift.joss.model.Access;
@@ -31,7 +30,8 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public class SwiftDirectClient {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(SwiftDirectClient.class);
+
   private static final int HTTP_READ_TIMEOUT = 100 * 1000;
   private static final int HTTP_CHUNK_STREAMING = 8 * 1024 * 1024;
 
@@ -45,7 +45,6 @@ public class SwiftDirectClient {
    *
    * @param access JOSS access object
    * @param objectName name of the object to create
-   * @throws IOException if an I/O error occurs
    * @return SwiftOutputStream that will be used to upload data to Swift
    */
   public static SwiftOutputStream put(Access access, String objectName) throws IOException {

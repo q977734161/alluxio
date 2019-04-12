@@ -15,9 +15,13 @@ import alluxio.AlluxioURI;
 import alluxio.client.ReadType;
 import alluxio.client.WriteType;
 import alluxio.client.file.FileSystem;
-import alluxio.client.file.options.DeleteOptions;
+import alluxio.client.file.FileSystemContext;
+import alluxio.conf.InstancedConfiguration;
 import alluxio.examples.BasicNonByteBufferOperations;
 import alluxio.examples.BasicOperations;
+import alluxio.grpc.DeletePOptions;
+import alluxio.util.ConfigurationUtils;
+import alluxio.util.io.PathUtils;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -38,9 +42,12 @@ public final class TestRunner {
       Arrays.asList(ReadType.CACHE_PROMOTE, ReadType.CACHE, ReadType.NO_CACHE);
 
   /** Write types to test. */
-  private static final List<WriteType> WRITE_TYPES = Arrays
-      .asList(WriteType.MUST_CACHE, WriteType.CACHE_THROUGH, WriteType.THROUGH,
-          WriteType.ASYNC_THROUGH);
+  private static final List<WriteType> WRITE_TYPES = Arrays.asList(WriteType.MUST_CACHE,
+      WriteType.CACHE_THROUGH, WriteType.THROUGH, WriteType.ASYNC_THROUGH);
+
+  @Parameter(names = "--directory",
+      description = "Alluxio path for the tests working directory.")
+  private String mDirectory = AlluxioURI.SEPARATOR;
 
   @Parameter(names = {"-h", "--help"}, description = "Prints usage information", help = true)
   private boolean mHelp;
@@ -74,13 +81,12 @@ public final class TestRunner {
   private TestRunner() {} // prevent instantiation
 
   /** Directory for the test generated files. */
-  public static final String TEST_PATH = "/default_tests_files";
+  public static final String TEST_DIRECTORY_NAME = "default_tests_files";
 
   /**
    * Console program that validates the configuration.
    *
    * @param args there are no arguments needed
-   * @throws Exception if error occurs during tests
    */
   public static void main(String[] args) throws Exception {
     TestRunner runner = new TestRunner();
@@ -91,12 +97,6 @@ public final class TestRunner {
       return;
     }
 
-    AlluxioURI testDir = new AlluxioURI(TEST_PATH);
-
-    FileSystem fs = FileSystem.Factory.get();
-    if (fs.exists(testDir)) {
-      fs.delete(testDir, DeleteOptions.defaults().setRecursive(true));
-    }
     int ret = runner.runTests();
     System.exit(ret);
   }
@@ -106,7 +106,18 @@ public final class TestRunner {
    *
    * @return the number of failed tests
    */
-  private int runTests() {
+  private int runTests() throws Exception {
+    mDirectory = PathUtils.concatPath(mDirectory, TEST_DIRECTORY_NAME);
+
+    AlluxioURI testDir = new AlluxioURI(mDirectory);
+    FileSystemContext fsContext =
+        FileSystemContext.create(new InstancedConfiguration(ConfigurationUtils.defaults()));
+    FileSystem fs =
+        FileSystem.Factory.create(fsContext);
+    if (fs.exists(testDir)) {
+      fs.delete(testDir, DeletePOptions.newBuilder().setRecursive(true).setUnchecked(true).build());
+    }
+
     int failed = 0;
 
     List<ReadType> readTypes =
@@ -120,7 +131,7 @@ public final class TestRunner {
       for (WriteType writeType : writeTypes) {
         for (OperationType opType : operations) {
           System.out.println(String.format("runTest %s %s %s", opType, readType, writeType));
-          failed += runTest(opType, readType, writeType);
+          failed += runTest(opType, readType, writeType, fsContext);
         }
       }
     }
@@ -138,18 +149,20 @@ public final class TestRunner {
    * @param writeType write type
    * @return 0 on success, 1 on failure
    */
-  private static int runTest(OperationType opType, ReadType readType, WriteType writeType) {
+  private int runTest(OperationType opType, ReadType readType, WriteType writeType,
+      FileSystemContext fsContext) {
     AlluxioURI filePath =
-        new AlluxioURI(String.format("%s/%s_%s_%s", TEST_PATH, opType, readType, writeType));
+        new AlluxioURI(String.format("%s/%s_%s_%s", mDirectory, opType, readType, writeType));
 
     boolean result = true;
     switch (opType) {
       case BASIC:
-        result = CliUtils.runExample(new BasicOperations(filePath, readType, writeType));
+        result = CliUtils.runExample(new BasicOperations(filePath, readType, writeType, fsContext));
         break;
       case BASIC_NON_BYTE_BUFFER:
         result = CliUtils
-            .runExample(new BasicNonByteBufferOperations(filePath, readType, writeType, true, 20));
+            .runExample(new BasicNonByteBufferOperations(filePath, readType, writeType, true, 20,
+             fsContext));
         break;
       default:
         System.out.println("Unrecognized operation type " + opType);

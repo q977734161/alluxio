@@ -13,6 +13,7 @@ package alluxio.worker.block.io;
 
 import com.google.common.base.Preconditions;
 import com.google.common.io.Closer;
+import io.netty.buffer.ByteBuf;
 
 import java.io.IOException;
 import java.io.RandomAccessFile;
@@ -32,18 +33,19 @@ public final class LocalFileBlockReader implements BlockReader {
   private final FileChannel mLocalFileChannel;
   private final Closer mCloser = Closer.create();
   private final long mFileSize;
+  private boolean mClosed;
+  private int mUsageCount = 0;
 
   /**
    * Constructs a Block reader given the file path of the block.
    *
    * @param path file path of the block
-   * @throws IOException if its file can not be open with "r" mode
    */
   public LocalFileBlockReader(String path) throws IOException {
-    mFilePath = Preconditions.checkNotNull(path);
+    mFilePath = Preconditions.checkNotNull(path, "path");
     mLocalFile = mCloser.register(new RandomAccessFile(mFilePath, "r"));
-    mLocalFileChannel = mCloser.register(mLocalFile.getChannel());
     mFileSize = mLocalFile.length();
+    mLocalFileChannel = mCloser.register(mLocalFile.getChannel());
   }
 
   @Override
@@ -54,6 +56,35 @@ public final class LocalFileBlockReader implements BlockReader {
   @Override
   public long getLength() {
     return mFileSize;
+  }
+
+  /**
+   * increase the file reader usage count.
+   */
+  public void increaseUsageCount() {
+    mUsageCount++;
+  }
+
+  /**
+   * decrease the file reader usage count.
+   */
+  public void decreaseUsageCount() {
+    Preconditions.checkState(mUsageCount > 0);
+    mUsageCount--;
+  }
+
+  /**
+   * @return the file reader usage count
+   */
+  public int getUsageCount() {
+    return mUsageCount;
+  }
+
+  /**
+   * @return the file path
+   */
+  public String getFilePath() {
+    return mFilePath;
   }
 
   @Override
@@ -68,7 +99,25 @@ public final class LocalFileBlockReader implements BlockReader {
   }
 
   @Override
+  public int transferTo(ByteBuf buf) throws IOException {
+    return buf.writeBytes(mLocalFileChannel, buf.writableBytes());
+  }
+
+  @Override
   public void close() throws IOException {
-    mCloser.close();
+    Preconditions.checkState(mUsageCount == 0);
+    if (mClosed) {
+      return;
+    }
+    try {
+      mCloser.close();
+    } finally {
+      mClosed = true;
+    }
+  }
+
+  @Override
+  public boolean isClosed() {
+    return mClosed;
   }
 }

@@ -11,9 +11,9 @@
 
 package alluxio.master;
 
-import alluxio.Constants;
+import alluxio.ProcessUtils;
 import alluxio.RuntimeConstants;
-import alluxio.ServerUtils;
+import alluxio.util.CommonUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +25,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class AlluxioMaster {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(AlluxioMaster.class);
 
   /**
    * Starts the Alluxio master.
@@ -39,8 +39,20 @@ public final class AlluxioMaster {
       System.exit(-1);
     }
 
-    AlluxioMasterService master = AlluxioMasterService.Factory.create();
-    ServerUtils.run(master, "Alluxio master");
+    CommonUtils.PROCESS_TYPE.set(CommonUtils.ProcessType.MASTER);
+    MasterProcess process;
+    try {
+      process = AlluxioMasterProcess.Factory.create();
+    } catch (Throwable t) {
+      ProcessUtils.fatalError(LOG, t, "Failed to create master process");
+      // fatalError will exit, so we shouldn't reach here.
+      throw t;
+    }
+
+    // Register a shutdown hook for master, so that master closes the journal files when it
+    // receives SIGTERM.
+    ProcessUtils.stopProcessOnShutdown(process);
+    ProcessUtils.run(process);
   }
 
   private AlluxioMaster() {} // prevent instantiation

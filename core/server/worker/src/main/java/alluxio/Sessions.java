@@ -11,6 +11,10 @@
 
 package alluxio;
 
+import alluxio.conf.ServerConfiguration;
+import alluxio.conf.PropertyKey;
+import alluxio.util.IdUtils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,14 +31,17 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class Sessions {
+  private static final Logger LOG = LoggerFactory.getLogger(Sessions.class);
+
   public static final int DATASERVER_SESSION_ID = -1;
   public static final int CHECKPOINT_SESSION_ID = -2;
   public static final int MIGRATE_DATA_SESSION_ID = -3;
   public static final int MASTER_COMMAND_SESSION_ID = -4;
   public static final int ACCESS_BLOCK_SESSION_ID = -5;
-  public static final int KEYVALUE_SESSION_ID = -6;
+  public static final int ASYNC_CACHE_SESSION_ID = -7;
 
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  // internal session id base should be smaller than all predefined session ids
+  public static final long INTERNAL_SESSION_ID_BASE = -8;
 
   /** Map from SessionId to {@link alluxio.SessionInfo} object. */
   private final Map<Long, SessionInfo> mSessions;
@@ -52,7 +59,6 @@ public final class Sessions {
    * @return the list of session ids of sessions that timed out
    */
   public List<Long> getTimedOutSessions() {
-    LOG.debug("Worker is checking all sessions' status for timeouts.");
     List<Long> ret = new ArrayList<>();
     synchronized (mSessions) {
       for (Entry<Long, SessionInfo> entry : mSessions.entrySet()) {
@@ -86,9 +92,18 @@ public final class Sessions {
       if (mSessions.containsKey(sessionId)) {
         mSessions.get(sessionId).heartbeat();
       } else {
-        int sessionTimeoutMs = Configuration.getInt(PropertyKey.WORKER_SESSION_TIMEOUT_MS);
+        int sessionTimeoutMs = (int) ServerConfiguration
+            .getMs(PropertyKey.WORKER_SESSION_TIMEOUT_MS);
         mSessions.put(sessionId, new SessionInfo(sessionId, sessionTimeoutMs));
       }
     }
+  }
+
+  /**
+   * @return a session id used internally in workers
+   */
+  public static long createInternalSessionId() {
+    return INTERNAL_SESSION_ID_BASE
+        - IdUtils.getRandomNonNegativeLong() % (Long.MAX_VALUE + INTERNAL_SESSION_ID_BASE);
   }
 }

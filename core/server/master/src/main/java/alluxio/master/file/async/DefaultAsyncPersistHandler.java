@@ -12,18 +12,18 @@
 package alluxio.master.file.async;
 
 import alluxio.AlluxioURI;
-import alluxio.Constants;
 import alluxio.exception.AccessControlException;
 import alluxio.exception.AlluxioException;
 import alluxio.exception.FileDoesNotExistException;
 import alluxio.exception.InvalidPathException;
+import alluxio.exception.status.UnavailableException;
 import alluxio.master.file.FileSystemMaster;
 import alluxio.master.file.meta.FileSystemMasterView;
-import alluxio.thrift.PersistFile;
 import alluxio.util.IdUtils;
 import alluxio.wire.BlockLocation;
 import alluxio.wire.FileBlockInfo;
 import alluxio.wire.FileInfo;
+import alluxio.wire.PersistFile;
 import alluxio.wire.WorkerInfo;
 
 import com.google.common.base.Preconditions;
@@ -44,7 +44,7 @@ import java.util.Set;
  * the corresponding worker polls.
  */
 public final class DefaultAsyncPersistHandler implements AsyncPersistHandler {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(DefaultAsyncPersistHandler.class);
 
   private final FileSystemMasterView mFileSystemMasterView;
 
@@ -58,12 +58,12 @@ public final class DefaultAsyncPersistHandler implements AsyncPersistHandler {
    */
   public DefaultAsyncPersistHandler(FileSystemMasterView view) {
     mWorkerToAsyncPersistFiles = new HashMap<>();
-    mFileSystemMasterView = Preconditions.checkNotNull(view);
+    mFileSystemMasterView = Preconditions.checkNotNull(view, "view");
   }
 
   @Override
   public synchronized void scheduleAsyncPersistence(AlluxioURI path)
-      throws AlluxioException {
+      throws AlluxioException, UnavailableException {
     // find the worker
     long workerId = getWorkerStoringFile(path);
 
@@ -88,18 +88,22 @@ public final class DefaultAsyncPersistHandler implements AsyncPersistHandler {
    */
   // TODO(calvin): Propagate the exceptions in certain cases
   private long getWorkerStoringFile(AlluxioURI path)
-      throws FileDoesNotExistException, AccessControlException {
+      throws FileDoesNotExistException, AccessControlException, UnavailableException {
     long fileId = mFileSystemMasterView.getFileId(path);
-    if (mFileSystemMasterView.getFileInfo(fileId).getLength() == 0) {
-      // if file is empty, return any worker
-      List<WorkerInfo> workerInfoList = mFileSystemMasterView.getWorkerInfoList();
-      if (workerInfoList.isEmpty()) {
-        LOG.error("No worker is available");
-        return IdUtils.INVALID_WORKER_ID;
+    try {
+      if (mFileSystemMasterView.getFileInfo(fileId).getLength() == 0) {
+        // if file is empty, return any worker
+        List<WorkerInfo> workerInfoList = mFileSystemMasterView.getWorkerInfoList();
+        if (workerInfoList.isEmpty()) {
+          LOG.error("No worker is available");
+          return IdUtils.INVALID_WORKER_ID;
+        }
+        // randomly pick a worker
+        int index = new Random().nextInt(workerInfoList.size());
+        return workerInfoList.get(index).getId();
       }
-      // randomly pick a worker
-      int index = new Random().nextInt(workerInfoList.size());
-      return workerInfoList.get(index).getId();
+    } catch (UnavailableException e) {
+      return IdUtils.INVALID_WORKER_ID;
     }
 
     Map<Long, Integer> workerBlockCounts = new HashMap<>();
@@ -127,6 +131,8 @@ public final class DefaultAsyncPersistHandler implements AsyncPersistHandler {
       return IdUtils.INVALID_WORKER_ID;
     } catch (InvalidPathException e) {
       LOG.error("The file {} to persist is invalid", path);
+      return IdUtils.INVALID_WORKER_ID;
+    } catch (UnavailableException e) {
       return IdUtils.INVALID_WORKER_ID;
     }
 
@@ -160,19 +166,28 @@ public final class DefaultAsyncPersistHandler implements AsyncPersistHandler {
     }
 
     Set<Long> scheduledFiles = mWorkerToAsyncPersistFiles.get(workerId);
-    for (long fileId : scheduledFiles) {
-      FileInfo fileInfo = mFileSystemMasterView.getFileInfo(fileId);
-      if (fileInfo.isCompleted()) {
-        fileIdsToPersist.add(fileId);
-        List<Long> blockIds = new ArrayList<>();
-        for (FileBlockInfo fileBlockInfo : mFileSystemMasterView
-            .getFileBlockInfoList(mFileSystemMasterView.getPath(fileId))) {
-          blockIds.add(fileBlockInfo.getBlockInfo().getBlockId());
-        }
+    try {
+      for (long fileId : scheduledFiles) {
+        try {
+          FileInfo fileInfo = mFileSystemMasterView.getFileInfo(fileId);
+          if (fileInfo.isCompleted()) {
+            fileIdsToPersist.add(fileId);
+            List<Long> blockIds = new ArrayList<>();
+            for (FileBlockInfo fileBlockInfo : mFileSystemMasterView
+                .getFileBlockInfoList(mFileSystemMasterView.getPath(fileId))) {
+              blockIds.add(fileBlockInfo.getBlockInfo().getBlockId());
+            }
 
-        filesToPersist.add(new PersistFile(fileId, blockIds));
+            filesToPersist.add(new PersistFile(fileId, blockIds));
+          }
+        } catch (FileDoesNotExistException e) {
+          LOG.warn("FileId {} does not exist, ignore persistence it", fileId);
+        }
       }
+    } catch (UnavailableException e) {
+      return filesToPersist;
     }
+
     mWorkerToAsyncPersistFiles.get(workerId).removeAll(fileIdsToPersist);
     return filesToPersist;
   }

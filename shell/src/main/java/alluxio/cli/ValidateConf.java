@@ -11,8 +11,8 @@
 
 package alluxio.cli;
 
-import alluxio.Configuration;
-import alluxio.Constants;
+import alluxio.conf.InstancedConfiguration;
+import alluxio.util.ConfigurationUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,7 +24,7 @@ import javax.annotation.concurrent.ThreadSafe;
  */
 @ThreadSafe
 public final class ValidateConf {
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(ValidateConf.class);
 
   /**
    * Console program that validates the configuration.
@@ -32,15 +32,15 @@ public final class ValidateConf {
    * @param args there are no arguments needed
    */
   public static void main(String[] args) {
-    int ret = 0;
     LOG.info("Validating configuration.");
-    if (Configuration.validate()) {
-      LOG.info("All configuration entries are valid.");
-    } else {
-      LOG.info("Configuration has invalid entries.");
-      ret = -1;
+    try {
+      new InstancedConfiguration(ConfigurationUtils.defaults()).validate();
+      LOG.info("Configuration is valid.");
+    } catch (IllegalStateException e) {
+      LOG.error("Configuration is invalid: {}", e.getMessage());
+      System.exit(-1);
     }
-    System.exit(ret);
+    System.exit(0);
   }
 
   private ValidateConf() {} // prevent instantiation.

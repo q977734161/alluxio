@@ -11,7 +11,9 @@
 
 package alluxio.wire;
 
-import org.codehaus.jackson.map.ObjectMapper;
+import alluxio.grpc.GrpcUtils;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -19,12 +21,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-public class BlockInfoTest {
+public final class BlockInfoTest {
 
   /**
    * Test to convert between a BlockInfo type and a json type.
-   *
-   * @throws Exception if an error occurs during convert between BlockInfo type and json type
    */
   @Test
   public void json() throws Exception {
@@ -35,12 +35,12 @@ public class BlockInfoTest {
   }
 
   /**
-   * Test to convert between a thrift type and a wire type.
+   * Test to convert between a proto type and a wire type.
    */
   @Test
-  public void thrift() {
+  public void proto() {
     BlockInfo blockInfo = createRandom();
-    BlockInfo other = ThriftUtils.fromThrift(ThriftUtils.toThrift(blockInfo));
+    BlockInfo other = GrpcUtils.fromProto(GrpcUtils.toProto(blockInfo));
     checkEquality(blockInfo, other);
   }
 

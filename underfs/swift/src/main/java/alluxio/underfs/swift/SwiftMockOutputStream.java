@@ -11,13 +11,12 @@
 
 package alluxio.underfs.swift;
 
-import alluxio.Constants;
+import alluxio.util.CommonUtils;
 import alluxio.util.io.PathUtils;
 
 import org.javaswift.joss.model.Account;
 import org.javaswift.joss.model.Container;
 import org.javaswift.joss.model.StoredObject;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,6 +25,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.List;
 import java.util.UUID;
 
 import javax.annotation.concurrent.NotThreadSafe;
@@ -36,8 +36,7 @@ import javax.annotation.concurrent.NotThreadSafe;
  */
 @NotThreadSafe
 public class SwiftMockOutputStream extends OutputStream {
-
-  private static final Logger LOG = LoggerFactory.getLogger(Constants.LOGGER_TYPE);
+  private static final Logger LOG = LoggerFactory.getLogger(SwiftMockOutputStream.class);
 
   private final File mFile;
 
@@ -58,15 +57,16 @@ public class SwiftMockOutputStream extends OutputStream {
    * @param account simulated Swift account
    * @param containerName container name
    * @param objectName name of file or folder to write
-   * @throws IOException if an I/O error occurs
+   * @param tmpDirs a list of temporary directories
    */
-  public SwiftMockOutputStream(Account account, String containerName, String objectName)
+  public SwiftMockOutputStream(Account account, String containerName, String objectName,
+      List<String> tmpDirs)
       throws IOException {
     try {
       mAccount = account;
       mContainerName = containerName;
       mObjectName = objectName;
-      mFile = new File(PathUtils.concatPath("/tmp", UUID.randomUUID()));
+      mFile = new File(PathUtils.concatPath(CommonUtils.getTmpDir(tmpDirs), UUID.randomUUID()));
       mOutputStream  = new BufferedOutputStream(new FileOutputStream(mFile));
     } catch (Exception e) {
       LOG.error(e.getMessage());
